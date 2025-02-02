@@ -788,7 +788,7 @@ function updateHUD() {
 //  SOCKET.IO
 // ---------------------------------
 function initSocket() {
-    socket = io('http://localhost:3000');
+    socket = io();
     socket.on('connect', () => {
         console.log('Connected to server. My socket id:', socket.id);
     });
