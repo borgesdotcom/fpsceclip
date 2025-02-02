@@ -46,7 +46,7 @@ let isRunning = false;
 let canDash = true;
 let dashCooldownTimer = 0;
 let isDashing = false;
-let dashTimer = 0;z
+let dashTimer = 0;
 let currentGunTilt = 0;
 
 const RUN_SPEED_MULTIPLIER = 1.5;
