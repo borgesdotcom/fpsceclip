@@ -6,12 +6,22 @@ import { io } from 'socket.io-client';
 //  SCENE, RENDERER, ETC.
 // ---------------------------------
 let scene, renderer;
+let currentRoomId = null;
 
 // We'll keep a reference to the local "playerGroup" which holds the camera + sphere + guns.
 let playerGroup;
 let camera;
 let audioContextSuspended = true;
+let controlsOverlay = false;
 
+const POWERUP_TYPES = {
+    HEALTH: { color: 0xff0000, duration: 0, respawnTime: 30 },
+    AMMO: { color: 0xffff00, duration: 0, respawnTime: 20 },
+    SPEED: { color: 0x00ff00, duration: 10, respawnTime: 45 },
+    DAMAGE: { color: 0xff00ff, duration: 15, respawnTime: 60 }
+};
+
+const powerUps = [];
 let socket;
 const otherPlayers = {}; // Store each remote player's Group by their socket.id
 
@@ -50,7 +60,7 @@ let dashTimer = 0;
 let currentGunTilt = 0;
 
 const RUN_SPEED_MULTIPLIER = 1.5;
-const BASE_MOVE_SPEED = 5.0;
+let BASE_MOVE_SPEED = 5.0;
 const GUN_TILT_ANGLE = 0.4; // Radians to tilt guns down when running
 const DASH_SPEED = 50.0;
 const DASH_DURATION = 0.3;
@@ -78,7 +88,7 @@ let isDead = false;
 // Gun/ammo config
 const MAX_AMMO = 8;
 const RELOAD_TIME = 0.6; // seconds
-const RECOIL_STRENGTH = 0.06;
+let RECOIL_STRENGTH = 0.06;
 const RECOIL_DURATION = 0.05;
 
 const hitMarkerEl = document.getElementById('hitMarker');
@@ -127,22 +137,30 @@ animate();
  * init()
  */
 function init() {
+    // =========================================================================
+    // 1. Scene & Renderer Setup
+    // =========================================================================
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0xa0d8f0);
 
-    // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     document.body.appendChild(renderer.domElement);
 
-    // Lights
+    // =========================================================================
+    // 2. Lighting
+    // =========================================================================
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
     scene.add(ambientLight);
+
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
     dirLight.position.set(10, 20, 10);
     scene.add(dirLight);
 
-    // Floor
+    // =========================================================================
+    // 3. Environment Objects
+    // =========================================================================
+    // --- Floor ---
     const floorGeo = new THREE.PlaneGeometry(200, 200);
     const floorMat = new THREE.MeshPhongMaterial({ color: 0x777777 });
     const floor = new THREE.Mesh(floorGeo, floorMat);
@@ -151,52 +169,41 @@ function init() {
     scene.add(floor);
     environmentMeshes.push(floor);
 
-    // Arena Parameters
+    // --- Arena Parameters ---
     const arenaSize = 40;
     const wallHeight = 15;
     const wallThickness = 2;
-    const wallColor = 0x444444;
 
-    // Central Platform
-    const platform = new THREE.Mesh(
-        new THREE.BoxGeometry(arenaSize, 1, arenaSize),
-        new THREE.MeshPhongMaterial({ color: 0x666666 })
-    );
+    // --- Central Platform ---
+    const platformGeo = new THREE.BoxGeometry(arenaSize, 1, arenaSize);
+    const platformMat = new THREE.MeshPhongMaterial({ color: 0x666666 });
+    const platform = new THREE.Mesh(platformGeo, platformMat);
     platform.position.set(0, 0, 0);
     scene.add(platform);
     environmentMeshes.push(platform);
 
-    // Surrounding Walls with Textures
-    const wallMat = new THREE.MeshPhongMaterial({ 
-        color: wallColor,
-        shininess: 30
-    });
-
-    // North Wall
+    // --- Walls ---
     const northWall = createWall(arenaSize, wallHeight, wallThickness);
-    northWall.position.set(0, wallHeight/2, arenaSize/2);
+    northWall.position.set(0, wallHeight / 2, arenaSize / 2);
     scene.add(northWall);
     environmentMeshes.push(northWall);
 
-    // South Wall
     const southWall = createWall(arenaSize, wallHeight, wallThickness);
-    southWall.position.set(0, wallHeight/2, -arenaSize/2);
+    southWall.position.set(0, wallHeight / 2, -arenaSize / 2);
     scene.add(southWall);
     environmentMeshes.push(southWall);
 
-    // East Wall
     const eastWall = createWall(wallThickness, wallHeight, arenaSize);
-    eastWall.position.set(arenaSize/2, wallHeight/2, 0);
+    eastWall.position.set(arenaSize / 2, wallHeight / 2, 0);
     scene.add(eastWall);
     environmentMeshes.push(eastWall);
 
-    // West Wall
     const westWall = createWall(wallThickness, wallHeight, arenaSize);
-    westWall.position.set(-arenaSize/2, wallHeight/2, 0);
+    westWall.position.set(-arenaSize / 2, wallHeight / 2, 0);
     scene.add(westWall);
     environmentMeshes.push(westWall);
 
-    // Vertical Pillars for Wall Jumping
+    // --- Vertical Pillars for Wall Jumping ---
     const pillarGeo = new THREE.BoxGeometry(4, wallHeight, 4);
     const pillarMat = new THREE.MeshPhongMaterial({ color: 0x555555 });
     for (let i = 0; i < 8; i++) {
@@ -205,81 +212,120 @@ function init() {
         const pillar = new THREE.Mesh(pillarGeo, pillarMat);
         pillar.position.set(
             Math.cos(angle) * radius,
-            wallHeight/2,
+            wallHeight / 2,
             Math.sin(angle) * radius
         );
         scene.add(pillar);
         environmentMeshes.push(pillar);
     }
 
-    // Elevated Platforms
+    // --- Elevated Platform ---
     const platformHeight = 12;
-    const highPlatform = new THREE.Mesh(
-        new THREE.BoxGeometry(15, 1, 15),
-        new THREE.MeshPhongMaterial({ color: 0x5a5a5a })
-    );
+    const highPlatformGeo = new THREE.BoxGeometry(15, 1, 15);
+    const highPlatformMat = new THREE.MeshPhongMaterial({ color: 0x5a5a5a });
+    const highPlatform = new THREE.Mesh(highPlatformGeo, highPlatformMat);
     highPlatform.position.set(0, platformHeight, 0);
     scene.add(highPlatform);
     environmentMeshes.push(highPlatform);
 
-    listener = new THREE.AudioListener();
-    scene.add(listener);
-
-    // Audio Loader (add in init())
-    const audioLoader = new THREE.AudioLoader();
-
-    // Load sounds
-    audioLoader.load('/sounds/gunshot.wav', (buffer) => sounds.gunshot = buffer);
-    audioLoader.load('/sounds/reload.mp3', (buffer) => sounds.reload = buffer);
-    audioLoader.load('sounds/dash.wav', (buffer) => sounds.dash = buffer);
-    audioLoader.load('sounds/jump.wav', (buffer) => sounds.jump = buffer);
-    audioLoader.load('sounds/hit.wav', (buffer) => sounds.hit = buffer);
-    audioLoader.load('sounds/hurt.wav', (buffer) => sounds.hurt = buffer);
-    audioLoader.load('sounds/death.mp3', (buffer) => sounds.death = buffer);
-    audioLoader.load('sounds/enemyhit.mp3', (buffer) => sounds.enemyhit = buffer);
-
-    // Floating Platforms
-    const floatingPlatform = new THREE.Mesh(
-        new THREE.BoxGeometry(10, 1, 10),
-        new THREE.MeshPhongMaterial({ color: 0x666666 })
-    );
-    floatingPlatform.position.set(0, 8, arenaSize/4);
+    // --- Floating Platform ---
+    const floatingPlatformGeo = new THREE.BoxGeometry(10, 1, 10);
+    const floatingPlatformMat = new THREE.MeshPhongMaterial({ color: 0x666666 });
+    const floatingPlatform = new THREE.Mesh(floatingPlatformGeo, floatingPlatformMat);
+    floatingPlatform.position.set(0, 8, arenaSize / 4);
     scene.add(floatingPlatform);
     environmentMeshes.push(floatingPlatform);
 
-    // Pointer lock
-    instructions.addEventListener('click', () => {
-        // Resolver o AudioContext primeiro
-        if (listener.context.state === 'suspended') {
-            listener.context.resume().then(() => {
-                audioContextSuspended = false;
-            });
-        }
-        
-        // Resto do código original
-        instructions.style.display = 'none';
-        document.body.requestPointerLock();
-    });
+    // =========================================================================
+    // 4. Power-Up Spawning on Valid Surfaces
+    // =========================================================================
+    // Define surfaces where power ups can safely appear.
+    // Each object includes a reference to the mesh, its width/depth (assumed centered),
+    // and a vertical offset so that the power-up sits on top.
+    const spawnableSurfaces = [
+        { mesh: floor, width: 200, depth: 200, offsetY: 0.5 },
+        { mesh: platform, width: arenaSize, depth: arenaSize, offsetY: 1 },
+        { mesh: highPlatform, width: 15, depth: 15, offsetY: 1 },
+        { mesh: floatingPlatform, width: 10, depth: 10, offsetY: 1 }
+    ];
+
+    // Spawn a set number of power ups (adjust count as needed)
+    const numberOfPowerUps = 6;
+    for (let i = 0; i < numberOfPowerUps; i++) {
+        // Randomly select a valid surface
+        const surface =
+            spawnableSurfaces[Math.floor(Math.random() * spawnableSurfaces.length)];
+    
+        // Determine a random position on that surface
+        const halfWidth = surface.width / 2;
+        const halfDepth = surface.depth / 2;
+        const randomX = Math.random() * surface.width - halfWidth;
+        const randomZ = Math.random() * surface.depth - halfDepth;
+        const pos = new THREE.Vector3(
+            surface.mesh.position.x + randomX,
+            surface.mesh.position.y + surface.offsetY,
+            surface.mesh.position.z + randomZ
+        );
+    
+        // Randomly select a power-up type (make sure this is inside the loop)
+        const typeKeys = Object.keys(POWERUP_TYPES);
+        const randomKey = typeKeys[Math.floor(Math.random() * typeKeys.length)];
+        const randomType = POWERUP_TYPES[randomKey];
+    
+        // Create and add the power-up
+        const powerUp = createPowerUp(randomType, pos);
+        powerUps.push(powerUp);
+        scene.add(powerUp.mesh);
+    }
+
+    // =========================================================================
+    // 5. Audio Setup
+    // =========================================================================
+    listener = new THREE.AudioListener();
+    scene.add(listener);
+
+    const audioLoader = new THREE.AudioLoader();
+    // Load sounds (ensure the file paths are correct)
+    audioLoader.load('/sounds/gunshot.wav', (buffer) => (sounds.gunshot = buffer));
+    audioLoader.load('/sounds/reload.mp3', (buffer) => (sounds.reload = buffer));
+    audioLoader.load('sounds/dash.wav', (buffer) => (sounds.dash = buffer));
+    audioLoader.load('sounds/jump.wav', (buffer) => (sounds.jump = buffer));
+    audioLoader.load('sounds/hit.wav', (buffer) => (sounds.hit = buffer));
+    audioLoader.load('sounds/hurt.wav', (buffer) => (sounds.hurt = buffer));
+    audioLoader.load('sounds/death.mp3', (buffer) => (sounds.death = buffer));
+    audioLoader.load('sounds/enemyhit.mp3', (buffer) => (sounds.enemyhit = buffer));
+    audioLoader.load('sounds/powerup.mp3', (buffer) => (sounds.powerup = buffer));
+
+    // =========================================================================
+    // 6. Pointer Lock and Event Handling
+    // =========================================================================
+
     document.addEventListener('pointerlockchange', onPointerLockChange, false);
     document.addEventListener('pointerlockerror', onPointerLockError, false);
 
-    // Events
+    // Keyboard and Mouse events
     document.addEventListener('keydown', onKeyDown, false);
     document.addEventListener('keyup', onKeyUp, false);
     document.addEventListener('mousedown', onMouseDown, false);
     document.addEventListener('mousemove', onMouseMove, false);
     window.addEventListener('resize', onWindowResize, false);
+
+    
+    
+    // Allow respawn on keydown if dead
     document.addEventListener('keydown', () => {
         if (isDead) {
-          resuscitate();
+            resuscitate();
         }
-      });
-
-    // Create the local player's group (sphere + camera + guns)
-    createLocalPlayer();
-
-    // Initialize Socket.IO
-    initSocket();
+    });
+    
+    renderer.domElement.style.visibility = 'hidden';
+    initMenu();
+    // =========================================================================
+    // 7. Player and Network Initialization
+    // =========================================================================
+    createLocalPlayer();  // Creates the local player's mesh, camera, guns, etc.
+    initSocket();         // Set up Socket.IO communication
     initBackgroundAudio();
 }
 
@@ -293,25 +339,25 @@ function init() {
 function resuscitate() {
     isDead = false;
     respawnOverlayEl.style.display = 'none';
-  
-    // Reset local HP
     playerHP = 100;
-  
-    // Reset local position, e.g. (0,1,0) or any spawn point
     playerGroup.position.set(0, 0, 0);
-  
-    // Update server
+    
+    // Restore visibility
+    playerGroup.traverse(obj => {
+        if (obj.material) obj.material.opacity = 1;
+    });
+    
     sendPlayerUpdate();
-  }
+}
 
-  function initBackgroundAudio() {
+function initBackgroundAudio() {
     const audioLoader = new THREE.AudioLoader();
     audioLoader.load('/sounds/background.mp3', (buffer) => {
         const bgSound = new THREE.Audio(listener);
         bgSound.setBuffer(buffer);
         bgSound.setLoop(true);
         bgSound.setVolume(0.1);
-        
+
         // Tocar apenas após interação do usuário
         document.addEventListener('click', () => {
             if (audioContextSuspended) {
@@ -322,44 +368,93 @@ function resuscitate() {
     });
 }
 
+function checkPowerUpCollisions() {
+    const playerPos = playerGroup.position;
+
+    powerUps.forEach(powerUp => {
+        if (!powerUp.active) return;
+
+        const distance = playerPos.distanceTo(powerUp.mesh.position);
+        if (distance < 1.2) {
+            applyPowerUp(powerUp.type);
+            powerUp.active = false;
+            scene.remove(powerUp.mesh);
+
+            playSound(sounds.powerup, 0.7);
+        }
+    });
+}
+
+function applyPowerUp(type) {
+    const icon = document.createElement('div');
+    icon.className = 'powerup-icon';
+    icon.style.backgroundColor = `#${type.color.toString(16)}`;
+    document.getElementById('active-powerups').appendChild(icon);
+
+    if (type.duration > 0) {
+        setTimeout(() => {
+            icon.remove();
+        }, type.duration * 1000);
+    }
+
+    switch (type) {
+        case POWERUP_TYPES.HEALTH:
+            playerHP = Math.min(playerHP + 30, 100);
+            updateHUD();
+            break;
+
+        case POWERUP_TYPES.AMMO:
+            guns.leftGun.ammo = MAX_AMMO;
+            guns.rightGun.ammo = MAX_AMMO;
+            updateHUD();
+            break;
+
+        case POWERUP_TYPES.SPEED:
+            const originalSpeed = BASE_MOVE_SPEED;
+            BASE_MOVE_SPEED *= 1.5;
+            
+            setTimeout(() => {
+                BASE_MOVE_SPEED = originalSpeed;
+            }, type.duration * 1000);
+            break;
+
+        case POWERUP_TYPES.DAMAGE:
+            // Aumentar dano temporariamente
+            const originalRecoil = RECOIL_STRENGTH;
+            RECOIL_STRENGTH *= 1.5;
+            setTimeout(() => {
+                RECOIL_STRENGTH = originalRecoil;
+            }, type.duration * 1000);
+            break;
+    }
+}
+
 function createLocalPlayer() {
-    // This group is the root transform for our local player
     playerGroup = new THREE.Group();
     scene.add(playerGroup);
 
-    // Create the sphere (the "body")
     const bodyGeo = new THREE.SphereGeometry(0.5, 16, 16);
-    // Make it slightly translucent so we can see from inside if desired
     const bodyMat = new THREE.MeshPhongMaterial({ color: 0x5555ff, opacity: 0, transparent: true });
     const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
-    // Lower it half its radius so it sits on the floor when y=0
     bodyMesh.position.set(0, 0.5, 0);
 
     playerGroup.add(bodyMesh);
 
-    // Camera: Place it slightly above the sphere center
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 0.5, 0); // inside or slightly above the sphere
+    camera.position.set(0, 0.5, 0);
     playerGroup.add(camera);
 
-    // Create the two guns, attach them to the sphere
-    // so that from the outside, others see them on the sphere’s sides.
-    // We'll also keep references in our `guns` object for local shooting logic.
     const leftGun = createGunMesh();
-    leftGun.position.set(-0.50, 0.6, -0.5);  // shift left from the center
+    leftGun.position.set(-0.50, 0.6, -0.5);
     playerGroup.add(leftGun);
     guns.leftGun.mesh = leftGun;
 
     const rightGun = createGunMesh();
-    rightGun.position.set(0.50, 0.6, -0.5); // shift right from the center
+    rightGun.position.set(0.50, 0.6, -0.5);
     playerGroup.add(rightGun);
     guns.rightGun.mesh = rightGun;
 }
 
-/**
- * A helper to create the same "sphere + guns" setup for remote players
- * (but we won't attach a camera to them, obviously).
- */
 function createPlayerMesh(color = 0xff0000) {
     const group = new THREE.Group();
 
@@ -380,16 +475,12 @@ function createPlayerMesh(color = 0xff0000) {
     rightGun.position.set(0.75, 0.3, 0);
     group.add(rightGun);
 
-    // Store references to the guns & muzzle flashes in userData
     group.userData.leftGun = leftGun;
     group.userData.rightGun = rightGun;
 
     return group;
 }
 
-/**
- * Our "shotgun" or "gun" mesh generator
- */
 function createGunMesh() {
     const gunGroup = new THREE.Group();
 
@@ -461,6 +552,8 @@ function onPointerLockError() {
 //  KEY/MOUSE EVENTS
 // ---------------------------------
 function onKeyDown(event) {
+    if (isDead) return;
+
     switch (event.code) {
         case 'KeyW':
         case 'ArrowUp':
@@ -556,6 +649,8 @@ function startDash() {
 }
 
 function onMouseDown(event) {
+    if (isDead) return;
+
     // 0 = left click, 2 = right click
     if (event.button === 0) {
         shootGun(guns.leftGun, 'left');
@@ -585,7 +680,7 @@ function onWindowResize() {
 //  SHOOTING
 // ---------------------------------
 function shootGun(gun, gunSide) {
-    if (isReloading || gun.ammo <= 0 || isRunning) return;
+    if (isDead || isReloading || gun.ammo <= 0 || isRunning) return;
 
     gun.ammo--;
     updateHUD();
@@ -694,23 +789,17 @@ function checkPlayerCollision(projectile) {
         }
     }
 
-    // 2. Optionally, also check collision with the local player if
-    //    you allow self-damage or friendly fire with other local clients, etc.
-    //    Usually you'd skip hitting yourself, but if you do want it:
-    if (projectile.shooterId !== socket.id) {  
-      // Only collide with me if I'm NOT the shooter
-      const localPos = playerGroup.position.clone();
-      localPos.y += 0.5;
-      if (projPos.distanceTo(localPos) < 0.5 + projRadius) {
-        // Projectile hit me (the local player):
-        socket.emit('playerHit', {
-          victimId: socket.id,
-          damage: 15,
-          shooterId: projectile.shooterId
-        });
-        // No hit marker for me, since I'm the one being hit here
-        return true;
-      }
+    if (projectile.shooterId !== socket.id) {
+        const localPos = playerGroup.position.clone();
+        localPos.y += 0.5;
+        if (!isDead && projPos.distanceTo(localPos) < 0.5 + projRadius) {
+            socket.emit('playerHit', {
+                victimId: socket.id,
+                damage: 15,
+                shooterId: projectile.shooterId
+            });
+            return true;
+        }
     }
 
     return false;
@@ -793,6 +882,21 @@ function initSocket() {
         console.log('Connected to server. My socket id:', socket.id);
     });
 
+    socket.on('matchFound', ({ roomId, opponent, opponentState, yourState }) => {
+        // Hide menu and show game
+        document.getElementById('mainMenu').style.display = 'none';
+        document.getElementById('modern-hud').style.display = 'block';
+        renderer.domElement.style.visibility = 'visible';
+        
+        // Initialize game state
+        initGameState(opponent, opponentState, yourState);
+      });
+    
+      socket.on('playerLeft', () => {
+        alert('Opponent disconnected! Returning to lobby...');
+        resetGameState();
+      });
+
     // Current players
     socket.on('currentPlayers', (players) => {
         for (let id in players) {
@@ -801,6 +905,10 @@ function initSocket() {
             }
         }
     });
+
+    socket.on('matchEnded', () => {
+        resetGameState();
+      });
 
     // A new player joined
     socket.on('newPlayer', (playerData) => {
@@ -812,12 +920,12 @@ function initSocket() {
     socket.on('playerKilled', ({ shooterId, victimId }) => {
         // 1) Add kill feed message
         addKillFeedMessage(`${shooterId} killed ${victimId}`);
-      
+
         // 2) If I'm the victim, handle local death
         if (victimId === socket.id) {
-          handleLocalPlayerDeath();
+            handleLocalPlayerDeath();
         }
-      });
+    });
 
     // A remote player updated
     socket.on('playerUpdated', (id, state) => {
@@ -837,7 +945,7 @@ function initSocket() {
         else {
             const other = otherPlayers[id];
             if (!other) return;
-    
+
             if (typeof state.hp !== 'undefined') {
                 other.userData.hp = state.hp;
                 // Optionally do something if the remote player has 0 HP, like hide them, etc.
@@ -878,8 +986,6 @@ function initSocket() {
         }
         if (gunMesh && gunMesh.userData.muzzleFlash) {
             gunMesh.userData.muzzleFlash.visible = true;
-            // We don't have a separate timer per remote gun in this example,
-            // so just hide it after a short timeout:
             setTimeout(() => {
                 gunMesh.userData.muzzleFlash.visible = false;
             }, 50);
@@ -895,8 +1001,55 @@ function initSocket() {
     });
 }
 
+function initGameState(opponentId, opponentState, yourState) {
+    // Reset scene
+    Object.keys(otherPlayers).forEach(id => {
+      scene.remove(otherPlayers[id]);
+      delete otherPlayers[id];
+    });
+  
+    // Set local player state
+    playerGroup.position.set(...yourState.position);
+    playerHP = yourState.hp;
+    guns.leftGun.ammo = yourState.ammoLeft;
+    guns.rightGun.ammo = yourState.ammoRight;
+    updateHUD();
+  
+    // Create opponent
+    createOtherPlayer(opponentId, opponentState);
+  
+    // Enable controls
+    document.body.requestPointerLock();
+  }
+
 function addKillFeedMessage(text) {
     killMessages.push({ text, life: KILL_FEED_DURATION });
+}
+
+function resetGameState() {
+    // Show menu again
+    document.getElementById('mainMenu').style.display = 'flex';
+    document.getElementById('modern-hud').style.display = 'none';
+    document.getElementById('matchStatus').style.display = 'none';
+    renderer.domElement.style.visibility = 'hidden';
+    
+    // Reset camera/controls
+    camera.rotation.set(0, 0, 0);
+    playerGroup.rotation.set(0, 0, 0);
+    document.exitPointerLock();
+  
+    // Clear game state
+    Object.keys(otherPlayers).forEach(id => {
+      scene.remove(otherPlayers[id]);
+      delete otherPlayers[id];
+    });
+    
+    // Reset local player
+    playerGroup.position.set(0, 0, 0);
+    playerHP = 100;
+    guns.leftGun.ammo = MAX_AMMO;
+    guns.rightGun.ammo = MAX_AMMO;
+    updateHUD();
   }
 
 /**
@@ -945,10 +1098,12 @@ function animate() {
 
     // 2) Movement input -> local velocity
     const inputVector = new THREE.Vector3();
-    if (moveForward) inputVector.z -= 5;
-    if (moveBackward) inputVector.z += 5;
-    if (moveLeft) inputVector.x -= 5;
-    if (moveRight) inputVector.x += 5;
+    if (!isDead) {
+        if (moveForward) inputVector.z -= 5;
+        if (moveBackward) inputVector.z += 5;
+        if (moveLeft) inputVector.x -= 5;
+        if (moveRight) inputVector.x += 5;
+    }
 
     const yawRotation = new THREE.Euler(0, yaw, 0, 'YXZ');
     const movementDir = inputVector.clone().applyEuler(yawRotation);
@@ -974,7 +1129,6 @@ function animate() {
     // 6) Check ground
     let onGround = false;
     if (playerGroup.position.y < 0) {
-        // Using y=0 as ground for the sphere’s center
         velocity.y = 0;
         playerGroup.position.y = 0;
         canJump = true;
@@ -1022,7 +1176,6 @@ function animate() {
     guns.rightGun.mesh.rotation.x = camera.rotation.x;
     guns.rightGun.mesh.rotation.z = camera.rotation.z;
 
-    // 10) Reload animation
     if (isReloading) {
         updateReloadAnimation(delta);
     }
@@ -1082,6 +1235,24 @@ function animate() {
 
     updateKillFeed(delta);
 
+    powerUps.forEach(powerUp => {
+        if (!powerUp.active) {
+            powerUp.respawnTimer += delta;
+            if (powerUp.respawnTimer >= powerUp.type.respawnTime) {
+                powerUp.active = true;
+                powerUp.respawnTimer = 0;
+                scene.add(powerUp.mesh);
+            }
+        } else {
+            powerUp.mesh.rotation.y += delta;
+            powerUp.particles.children.forEach(p => {
+                p.position.y = Math.sin(performance.now() * 0.001 + p.uOffset) * 0.2;
+            });
+        }
+    });
+
+    checkPowerUpCollisions();
+
     renderer.render(scene, camera);
 }
 
@@ -1095,23 +1266,23 @@ function showHitMarker() {
 function updateKillFeed(delta) {
     // Decrement life of each message
     for (let i = killMessages.length - 1; i >= 0; i--) {
-      killMessages[i].life -= delta;
-      if (killMessages[i].life <= 0) {
-        killMessages.splice(i, 1);
-      }
+        killMessages[i].life -= delta;
+        if (killMessages[i].life <= 0) {
+            killMessages.splice(i, 1);
+        }
     }
-  
+
     // Rebuild the killFeedEl's innerHTML
     killFeedEl.innerHTML = killMessages
-      .map(msg => `<div>${msg.text}</div>`)
-      .join('');
-  }
+        .map(msg => `<div>${msg.text}</div>`)
+        .join('');
+}
 
 /**
  * Send local player's data to server
  */
 function sendPlayerUpdate() {
-    if (!socket) return;
+    if (!socket || !currentRoomId) return;
     const pos = [
         playerGroup.position.x,
         playerGroup.position.y,
@@ -1134,7 +1305,7 @@ function sendPlayerUpdate() {
 
 function playSound(buffer, volume = 1) {
     if (!buffer || audioContextSuspended) return;
-    
+
     const sound = new THREE.Audio(listener);
     sound.setBuffer(buffer);
     sound.setVolume(volume);
@@ -1196,12 +1367,15 @@ function updateProjectiles(delta) {
 
 function handleLocalPlayerDeath() {
     isDead = true;
-    // Stop movement, optionally zero out velocity
     velocity.set(0, 0, 0);
-  
-    // Show overlay
-    respawnOverlayEl.style.display = 'flex'; // or 'block'
-  }
+    respawnOverlayEl.style.display = 'flex';
+    
+    // Automatically reset after 5 seconds
+    setTimeout(() => {
+      resuscitate();
+      resetGameState();
+    }, 5000);
+}
 
 function checkProjectileCollision(projMesh) {
     const radius = 0.05;
@@ -1269,6 +1443,23 @@ function updateShellCasings(delta) {
     }
 }
 
+function initMenu() {
+    document.getElementById('findMatchBtn').addEventListener('click', () => {
+      socket.emit('findMatch');
+      document.getElementById('matchStatus').style.display = 'block';
+    });
+  
+    document.getElementById('controlsBtn').addEventListener('click', () => {
+        document.getElementById('instructions').style.display = 'flex';
+        document.getElementById('menuButtons').style.display = 'none';
+    });
+
+    document.getElementById('controlsBackBtn').addEventListener('click', () => {
+          document.getElementById('instructions').style.display = 'none';
+          document.getElementById('menuButtons').style.display = 'flex';
+      });
+  }
+
 function checkPlayerCollisions() {
     isTouchingWall = false; // Reset each frame
     const playerSphere = new THREE.Sphere(
@@ -1312,9 +1503,44 @@ function checkPlayerCollisions() {
 function createWall(width, height, depth) {
     return new THREE.Mesh(
         new THREE.BoxGeometry(width, height, depth),
-        new THREE.MeshPhongMaterial({ 
+        new THREE.MeshPhongMaterial({
             color: 0x444444,
             shininess: 30
         })
     );
+}
+
+function createPowerUp(type, position) {
+    const geometry = new THREE.SphereGeometry(0.4, 16, 16);
+    const material = new THREE.MeshPhongMaterial({
+        color: type.color,
+        emissive: type.color,
+        emissiveIntensity: 0.5
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(position.x, position.y, position.z);
+
+    // Adicionar efeito de partículas
+    const particles = new THREE.Group();
+    const particleGeo = new THREE.SphereGeometry(0.05, 8, 8);
+    const particleMat = new THREE.MeshPhongMaterial({ color: type.color });
+    for (let i = 0; i < 8; i++) {
+        const particle = new THREE.Mesh(particleGeo, particleMat);
+        particle.uOffset = Math.random() * Math.PI * 2;
+        particle.position.set(
+            Math.random() - 0.5,
+            Math.random() - 0.5,
+            Math.random() - 0.5
+        ).normalize().multiplyScalar(0.6);
+        particles.add(particle);
+    }
+    mesh.add(particles);
+
+    return {
+        mesh: mesh,
+        type: type,
+        particles: particles,
+        active: true,
+        respawnTimer: 0
+    };
 }

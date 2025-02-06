@@ -4,7 +4,8 @@
   "description": "Minimal example of a Three.js FPS with pointer lock controls",
   "scripts": {
     "start": "node server.js",
-    "build": "webpack --mode production"
+    "build": "webpack --mode production",
+    "dev": "webpack-dev-server --open --mode development"
   },
   "dependencies": {
     "express": "^4.18.2",
