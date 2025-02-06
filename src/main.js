@@ -310,7 +310,9 @@ function init() {
     document.addEventListener('mousemove', onMouseMove, false);
     window.addEventListener('resize', onWindowResize, false);
 
-    
+    blocker.addEventListener('click', function() {
+        document.body.requestPointerLock();
+    });    
     
     // Allow respawn on keydown if dead
     document.addEventListener('keydown', () => {
@@ -539,8 +541,7 @@ function onPointerLockChange() {
     if (document.pointerLockElement === document.body) {
         blocker.style.display = 'none';
     } else {
-        blocker.style.display = 'block';
-        instructions.style.display = '';
+        blocker.style.display = 'flex';
     }
 }
 
@@ -884,6 +885,7 @@ function initSocket() {
 
     socket.on('matchFound', ({ roomId, opponent, opponentState, yourState }) => {
         // Hide menu and show game
+        currentRoomId = roomId;
         document.getElementById('mainMenu').style.display = 'none';
         document.getElementById('modern-hud').style.display = 'block';
         renderer.domElement.style.visibility = 'visible';
@@ -1283,6 +1285,7 @@ function updateKillFeed(delta) {
  */
 function sendPlayerUpdate() {
     if (!socket || !currentRoomId) return;
+
     const pos = [
         playerGroup.position.x,
         playerGroup.position.y,
