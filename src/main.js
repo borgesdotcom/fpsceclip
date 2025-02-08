@@ -829,7 +829,7 @@ function updateReloadAnimation(delta) {
     let reloadPhase = progress < 0.5 ? (progress * 2) : (2 - progress * 2);
 
     // Calculate pull back distance and rotation for a dynamic pump action
-    const pullBackDistance = reloadPhase * 0.3; // Adjust this value to control how far back the gun moves
+    const pullBackDistance = reloadPhase * -0.3; // Adjust this value to control how far back the gun moves
     const tiltAngle = reloadPhase * Math.PI / 3;
 
     // Apply position and rotation to both guns
@@ -1166,15 +1166,10 @@ function animate() {
     playerGroup.position.z += velocity.z * delta;
 
     // 6) Check ground
-    let onGround = false;
-    if (playerGroup.position.y < 0) {
-        velocity.y = 0;
-        playerGroup.position.y = 0;
-        canJump = true;
-        onGround = true;
+    const onGround = checkPlayerCollisions();
+    if (onGround) {
+        canJump = true; // Allow jumping when on the ground
     }
-
-    checkPlayerCollisions();
 
     if (isTouchingWall && !onGround) {
         velocity.y = Math.max(velocity.y, -wallSlideSpeed);
@@ -1245,7 +1240,10 @@ function animate() {
 
     if (!canDash) {
         dashCooldownTimer += delta;
-        dashCooldownTimer = Math.min(dashCooldownTimer, DASH_COOLDOWN);
+        if (dashCooldownTimer >= DASH_COOLDOWN) {
+            canDash = true;
+            dashCooldownTimer = 0;
+        }
         updateHUD();
     }
 
@@ -1500,15 +1498,16 @@ function initMenu() {
       });
   }
 
-function checkPlayerCollisions() {
+  function checkPlayerCollisions() {
     isTouchingWall = false; // Reset each frame
+    let onGround = false; // Track if the player is on the ground
     const playerSphere = new THREE.Sphere(
         new THREE.Vector3(
             playerGroup.position.x,
-            playerGroup.position.y + 0.5,
+            playerGroup.position.y + 0.5, // Adjust for player's center
             playerGroup.position.z
         ),
-        0.5
+        0.5 // Player's collision radius
     );
 
     for (const mesh of environmentMeshes) {
@@ -1516,28 +1515,37 @@ function checkPlayerCollisions() {
         if (box.intersectsSphere(playerSphere)) {
             const closestPoint = new THREE.Vector3();
             box.clampPoint(playerSphere.center, closestPoint);
-
             const direction = playerSphere.center.clone().sub(closestPoint);
             const distance = direction.length();
 
             if (distance < playerSphere.radius) {
                 const overlap = playerSphere.radius - distance;
                 const normal = direction.normalize();
-
                 playerGroup.position.add(normal.multiplyScalar(overlap));
 
+                // Check if collision is with the ground (normal pointing upwards)
+                if (normal.y > 1) { // Adjust threshold based on your needs
+                    onGround = true;
+                    velocity.y = 0; // Stop vertical movement
+                }
+
+                // Wall collision handling
+                if (Math.abs(normal.y) < 0.3) {
+                    isTouchingWall = true;
+                    lastWallNormal.copy(normal);
+                    lastWallTime = performance.now();
+                }
+
+                // Adjust velocity to prevent sinking into the surface
                 const velocityDot = velocity.dot(normal);
                 if (velocityDot < 0) {
                     velocity.addScaledVector(normal, -velocityDot);
                 }
-
-                // Update wall jump variables
-                isTouchingWall = true;
-                lastWallNormal.copy(normal);
-                lastWallTime = performance.now();
             }
         }
     }
+
+    return onGround;
 }
 
 function createWall(width, height, depth) {
