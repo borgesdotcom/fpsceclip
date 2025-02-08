@@ -735,7 +735,7 @@ function ejectShell(gunMesh) {
 
 function spawnProjectile(gunMesh) {
     const projGeo = new THREE.SphereGeometry(0.05, 8, 8);
-    const projMat = new THREE.MeshPhongMaterial({ color: 0xffffff });
+    const projMat = new THREE.MeshPhongMaterial({ color: 0xff0000 });
     const projectile = new THREE.Mesh(projGeo, projMat);
 
     const muzzlePos = new THREE.Vector3();
@@ -947,16 +947,28 @@ function initSocket() {
         else {
             const other = otherPlayers[id];
             if (!other) return;
-
+    
             if (typeof state.hp !== 'undefined') {
                 other.userData.hp = state.hp;
-                // Optionally do something if the remote player has 0 HP, like hide them, etc.
             }
             if (state.position) {
                 other.position.set(state.position[0], state.position[1], state.position[2]);
             }
             if (state.rotation) {
-                other.rotation.set(state.rotation[0], state.rotation[1], state.rotation[2]);
+                // Set group's Y rotation (yaw)
+                other.rotation.y = state.rotation[1]; // Yaw
+                
+                // Update gun rotations (pitch and roll)
+                const leftGun = other.userData.leftGun;
+                const rightGun = other.userData.rightGun;
+                if (leftGun) {
+                    leftGun.rotation.x = state.rotation[0]; // Pitch
+                    leftGun.rotation.z = state.rotation[2]; // Roll
+                }
+                if (rightGun) {
+                    rightGun.rotation.x = state.rotation[0]; // Pitch
+                    rightGun.rotation.z = state.rotation[2]; // Roll
+                }
             }
         }
 
@@ -968,7 +980,6 @@ function initSocket() {
 
     // A remote player has fired
     socket.on('playerShot', (playerId, gunSide) => {
-        console.log(`Player ${playerId} shot with ${gunSide} gun!`);
         const other = otherPlayers[playerId];
         if (!other) return;
 
@@ -987,10 +998,36 @@ function initSocket() {
             gunMesh = other.userData.rightGun;
         }
         if (gunMesh && gunMesh.userData.muzzleFlash) {
+            // Show muzzle flash
             gunMesh.userData.muzzleFlash.visible = true;
             setTimeout(() => {
                 gunMesh.userData.muzzleFlash.visible = false;
             }, 50);
+    
+            // Spawn projectile from remote player's gun
+            const muzzleFlash = gunMesh.userData.muzzleFlash;
+            const worldPos = new THREE.Vector3();
+            muzzleFlash.getWorldPosition(worldPos);
+    
+            // Calculate direction based on gun's orientation
+            const direction = new THREE.Vector3();
+            gunMesh.getWorldDirection(direction);
+            direction.negate(); // Guns point along -Z
+            const projVel = direction.multiplyScalar(projectileSpeed);
+    
+            // Create projectile mesh
+            const projGeo = new THREE.SphereGeometry(0.05, 8, 8);
+            const projMat = new THREE.MeshPhongMaterial({ color: 0xff0000 }); // Red for enemy shots
+            const projectile = new THREE.Mesh(projGeo, projMat);
+            projectile.position.copy(worldPos);
+            scene.add(projectile);
+    
+            projectiles.push({
+                mesh: projectile,
+                velocity: projVel,
+                life: 0,
+                shooterId: playerId,
+            });
         }
     });
 
