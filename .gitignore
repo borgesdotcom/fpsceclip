@@ -1,2 +1,5 @@
 node_modules
 dist
+bundle.js
+bundle.js.LICENCE.txt
+public/bundle.js

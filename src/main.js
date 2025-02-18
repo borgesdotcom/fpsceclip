@@ -1,1364 +1,225 @@
+// main.js
 import * as THREE from 'three';
-// IMPORTANT: import socket.io-client
-import { io } from 'socket.io-client';
+import { state } from './state.js';
+import { createEnvironment, checkPlayerCollisions } from './environment.js';
+import { initAudio, initBackgroundAudio, playSound } from './audio.js';
+import { createLocalPlayer, updateReloadAnimation, sendPlayerUpdate } from './player.js';
+import { initSocket } from './network.js';
+import { spawnPowerUps, updatePowerUps, checkPowerUpCollisions, updateHUD } from './powerups.js';
+import { initControls } from './controls.js';
+import { initMenu } from './menu.js';
+import { updateKillFeed, spawnHitEffect } from './utils.js';
 
-// ---------------------------------
-//  SCENE, RENDERER, ETC.
-// ---------------------------------
-let scene, renderer;
-let currentRoomId = null;
-
-// We'll keep a reference to the local "playerGroup" which holds the camera + sphere + guns.
-let playerGroup;
-let camera;
-let audioContextSuspended = true;
-let controlsOverlay = false;
-
-const POWERUP_TYPES = {
-    HEALTH: { color: 0xff0000, duration: 0, respawnTime: 30 },
-    AMMO: { color: 0xffff00, duration: 0, respawnTime: 20 },
-    SPEED: { color: 0x00ff00, duration: 10, respawnTime: 45 },
-    DAMAGE: { color: 0xff00ff, duration: 15, respawnTime: 60 }
-};
-
-const powerUps = [];
-let socket;
-const otherPlayers = {}; // Store each remote player's Group by their socket.id
-
-let listener;
-const sounds = {}; // Stores loaded audio buffers
-
-// Movement, input
-let moveForward = false;
-let moveBackward = false;
-let moveLeft = false;
-let moveRight = false;
-let canJump = false;
-
-let velocity = new THREE.Vector3();
-let pitch = 0;
-let yaw = 0;
-const mouseSensitivity = 0.002;
-
-// "Head-bob"
-const baseHeight = 1.6;
-const bobAmplitude = 0.04;
-const bobFrequency = 8;
-let walkTime = 0;
-
-// "Turning tilt"
-let rollAngle = 0;
-let lastYaw = 0;
-const turnRollFactor = 0.4;
-const rollDamp = 6.0;
-
-let isRunning = false;
-let canDash = true;
-let dashCooldownTimer = 0;
-let isDashing = false;
-let dashTimer = 0;
-let currentGunTilt = 0;
-
-const RUN_SPEED_MULTIPLIER = 1.5;
-let BASE_MOVE_SPEED = 5.0;
-const GUN_TILT_ANGLE = 0.4; // Radians to tilt guns down when running
-const DASH_SPEED = 50.0;
-const DASH_DURATION = 0.3;
-const DASH_COOLDOWN = 2.0;
-const DASH_ROLL_ANGLE = Math.PI / 2; // 60 degrees
-
-// Timing
-let prevTime = performance.now();
-
-// Pointer lock elements
-const blocker = document.getElementById('blocker');
-const instructions = document.getElementById('instructions');
-
-// Player stats
-let playerHP = 100;  // local player's HP
-
-const killFeedEl = document.getElementById('killFeed');
-const killMessages = []; // will store { text, life } objects
-const KILL_FEED_DURATION = 5; // each message lives 5 seconds
-
-// Death/Respawn overlay
-const respawnOverlayEl = document.getElementById('respawnOverlay');
-let isDead = false;
-
-// Gun/ammo config
-const MAX_AMMO = 8;
-const RELOAD_TIME = 0.6; // seconds
-let RECOIL_STRENGTH = 0.06;
-const RECOIL_DURATION = 0.05;
-
-const hitMarkerEl = document.getElementById('hitMarker');
-let hitMarkerTimer = 0;
-let hitMarkerDuration = 0.2;
-
-// For local player guns
-const guns = {
-    leftGun: { mesh: null, ammo: MAX_AMMO, muzzleFlashTimer: 0 },
-    rightGun: { mesh: null, ammo: MAX_AMMO, muzzleFlashTimer: 0 }
-};
-
-// Reload
-let isReloading = false;
-let reloadTimer = 0;
-
-// Recoil
-let recoilTimer = 0;
-let currentRecoil = 0;
-
-// Projectiles
-const projectiles = [];
-const projectileSpeed = 50;
-const projectileLifetime = 2;
-
-// Shell casings
-const shellCasings = [];
-// Hit effects
-const hitEffects = [];
-// Environment
-const environmentMeshes = [];
-
-let lastWallNormal = new THREE.Vector3();
-let lastWallTime = 0;
-const wallJumpGracePeriod = 600; // ms
-const wallJumpVerticalSpeed = 7.0;
-const wallJumpHorizontalSpeed = 5.0;
-const wallSlideSpeed = 1.5;
-let isTouchingWall = false;
-
-// Init
 init();
 animate();
 
-/**
- * init()
- */
 function init() {
-    // =========================================================================
-    // 1. Scene & Renderer Setup
-    // =========================================================================
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xa0d8f0);
+    // Seleciona elementos da UI
+    state.hitMarkerEl = document.getElementById('hitMarker');
+    state.blocker = document.getElementById('blocker');
+    state.instructions = document.getElementById('instructions');
+    state.killFeedEl = document.getElementById('killFeed');
+    state.respawnOverlayEl = document.getElementById('respawnOverlay');
 
-    renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    document.body.appendChild(renderer.domElement);
+    // Cena + render
+    state.scene = new THREE.Scene();
+    state.renderer = new THREE.WebGLRenderer({ antialias: true });
+    state.renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(state.renderer.domElement);
+    state.renderer.domElement.style.visibility = 'hidden';
 
-    // =========================================================================
-    // 2. Lighting
-    // =========================================================================
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
-    scene.add(ambientLight);
+    // Cria ambiente
+    const { floor, platform, highPlatform, floatingPlatform } = createEnvironment();
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(10, 20, 10);
-    scene.add(dirLight);
-
-    // =========================================================================
-    // 3. Environment Objects
-    // =========================================================================
-    // --- Floor ---
-    const floorGeo = new THREE.PlaneGeometry(200, 200);
-    const floorMat = new THREE.MeshPhongMaterial({ color: 0x777777 });
-    const floor = new THREE.Mesh(floorGeo, floorMat);
-    floor.rotation.x = -Math.PI / 2;
-    floor.receiveShadow = true;
-    scene.add(floor);
-    environmentMeshes.push(floor);
-
-    // --- Arena Parameters ---
-    const arenaSize = 40;
-    const wallHeight = 15;
-    const wallThickness = 2;
-
-    // --- Central Platform ---
-    const platformGeo = new THREE.BoxGeometry(arenaSize, 1, arenaSize);
-    const platformMat = new THREE.MeshPhongMaterial({ color: 0x666666 });
-    const platform = new THREE.Mesh(platformGeo, platformMat);
-    platform.position.set(0, 0, 0);
-    scene.add(platform);
-    environmentMeshes.push(platform);
-
-    // --- Walls ---
-    const northWall = createWall(arenaSize, wallHeight, wallThickness);
-    northWall.position.set(0, wallHeight / 2, arenaSize / 2);
-    scene.add(northWall);
-    environmentMeshes.push(northWall);
-
-    const southWall = createWall(arenaSize, wallHeight, wallThickness);
-    southWall.position.set(0, wallHeight / 2, -arenaSize / 2);
-    scene.add(southWall);
-    environmentMeshes.push(southWall);
-
-    const eastWall = createWall(wallThickness, wallHeight, arenaSize);
-    eastWall.position.set(arenaSize / 2, wallHeight / 2, 0);
-    scene.add(eastWall);
-    environmentMeshes.push(eastWall);
-
-    const westWall = createWall(wallThickness, wallHeight, arenaSize);
-    westWall.position.set(-arenaSize / 2, wallHeight / 2, 0);
-    scene.add(westWall);
-    environmentMeshes.push(westWall);
-
-    // --- Vertical Pillars for Wall Jumping ---
-    const pillarGeo = new THREE.BoxGeometry(4, wallHeight, 4);
-    const pillarMat = new THREE.MeshPhongMaterial({ color: 0x555555 });
-    for (let i = 0; i < 8; i++) {
-        const angle = (i / 8) * Math.PI * 2;
-        const radius = arenaSize * 0.35;
-        const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-        pillar.position.set(
-            Math.cos(angle) * radius,
-            wallHeight / 2,
-            Math.sin(angle) * radius
-        );
-        scene.add(pillar);
-        environmentMeshes.push(pillar);
-    }
-
-    // --- Elevated Platform ---
-    const platformHeight = 12;
-    const highPlatformGeo = new THREE.BoxGeometry(15, 1, 15);
-    const highPlatformMat = new THREE.MeshPhongMaterial({ color: 0x5a5a5a });
-    const highPlatform = new THREE.Mesh(highPlatformGeo, highPlatformMat);
-    highPlatform.position.set(0, platformHeight, 0);
-    scene.add(highPlatform);
-    environmentMeshes.push(highPlatform);
-
-    // --- Floating Platform ---
-    const floatingPlatformGeo = new THREE.BoxGeometry(10, 1, 10);
-    const floatingPlatformMat = new THREE.MeshPhongMaterial({ color: 0x666666 });
-    const floatingPlatform = new THREE.Mesh(floatingPlatformGeo, floatingPlatformMat);
-    floatingPlatform.position.set(0, 8, arenaSize / 4);
-    scene.add(floatingPlatform);
-    environmentMeshes.push(floatingPlatform);
-
-    // =========================================================================
-    // 4. Power-Up Spawning on Valid Surfaces
-    // =========================================================================
-    // Define surfaces where power ups can safely appear.
-    // Each object includes a reference to the mesh, its width/depth (assumed centered),
-    // and a vertical offset so that the power-up sits on top.
+    // Surfaces para spawn de powerups
     const spawnableSurfaces = [
         { mesh: floor, width: 200, depth: 200, offsetY: 0.5 },
-        { mesh: platform, width: arenaSize, depth: arenaSize, offsetY: 1 },
+        { mesh: platform, width: 40, depth: 40, offsetY: 1 },
         { mesh: highPlatform, width: 15, depth: 15, offsetY: 1 },
         { mesh: floatingPlatform, width: 10, depth: 10, offsetY: 1 }
     ];
+    spawnPowerUps(spawnableSurfaces, 6);
 
-    // Spawn a set number of power ups (adjust count as needed)
-    const numberOfPowerUps = 6;
-    for (let i = 0; i < numberOfPowerUps; i++) {
-        // Randomly select a valid surface
-        const surface =
-            spawnableSurfaces[Math.floor(Math.random() * spawnableSurfaces.length)];
-    
-        // Determine a random position on that surface
-        const halfWidth = surface.width / 2;
-        const halfDepth = surface.depth / 2;
-        const randomX = Math.random() * surface.width - halfWidth;
-        const randomZ = Math.random() * surface.depth - halfDepth;
-        const pos = new THREE.Vector3(
-            surface.mesh.position.x + randomX,
-            surface.mesh.position.y + surface.offsetY,
-            surface.mesh.position.z + randomZ
-        );
-    
-        // Randomly select a power-up type (make sure this is inside the loop)
-        const typeKeys = Object.keys(POWERUP_TYPES);
-        const randomKey = typeKeys[Math.floor(Math.random() * typeKeys.length)];
-        const randomType = POWERUP_TYPES[randomKey];
-    
-        // Create and add the power-up
-        const powerUp = createPowerUp(randomType, pos);
-        powerUps.push(powerUp);
-        scene.add(powerUp.mesh);
-    }
-
-    // =========================================================================
-    // 5. Audio Setup
-    // =========================================================================
-    listener = new THREE.AudioListener();
-    scene.add(listener);
-
-    const audioLoader = new THREE.AudioLoader();
-    // Load sounds (ensure the file paths are correct)
-    audioLoader.load('/sounds/gunshot.wav', (buffer) => (sounds.gunshot = buffer));
-    audioLoader.load('/sounds/reload.mp3', (buffer) => (sounds.reload = buffer));
-    audioLoader.load('sounds/dash.wav', (buffer) => (sounds.dash = buffer));
-    audioLoader.load('sounds/jump.wav', (buffer) => (sounds.jump = buffer));
-    audioLoader.load('sounds/hit.wav', (buffer) => (sounds.hit = buffer));
-    audioLoader.load('sounds/hurt.wav', (buffer) => (sounds.hurt = buffer));
-    audioLoader.load('sounds/death.mp3', (buffer) => (sounds.death = buffer));
-    audioLoader.load('sounds/enemyhit.mp3', (buffer) => (sounds.enemyhit = buffer));
-    audioLoader.load('sounds/powerup.mp3', (buffer) => (sounds.powerup = buffer));
-
-    // =========================================================================
-    // 6. Pointer Lock and Event Handling
-    // =========================================================================
-
-    document.addEventListener('pointerlockchange', onPointerLockChange, false);
-    document.addEventListener('pointerlockerror', onPointerLockError, false);
-
-    // Keyboard and Mouse events
-    document.addEventListener('keydown', onKeyDown, false);
-    document.addEventListener('keyup', onKeyUp, false);
-    document.addEventListener('mousedown', onMouseDown, false);
-    document.addEventListener('mousemove', onMouseMove, false);
-    window.addEventListener('resize', onWindowResize, false);
-
-    blocker.addEventListener('click', function() {
-        document.body.requestPointerLock();
-    });    
-    
-    // Allow respawn on keydown if dead
-    document.addEventListener('keydown', () => {
-        if (isDead) {
-            resuscitate();
-        }
-    });
-    
-    renderer.domElement.style.visibility = 'hidden';
-    initMenu();
-    // =========================================================================
-    // 7. Player and Network Initialization
-    // =========================================================================
-    createLocalPlayer();  // Creates the local player's mesh, camera, guns, etc.
-    initSocket();         // Set up Socket.IO communication
+    // Audio
+    initAudio();
     initBackgroundAudio();
+
+    // Menu e Controles
+    initMenu();
+    initControls();
+
+    // Cria player local
+    createLocalPlayer();
+
+    // Inicia socket
+    initSocket();
 }
 
 /**
- * Create a local player group that includes:
- *  - A sphere to represent the body
- *  - Two guns on its sides
- *  - The camera (for first-person)
+ * Loop principal de animação.
  */
-
-function resuscitate() {
-    isDead = false;
-    respawnOverlayEl.style.display = 'none';
-    playerHP = 100;
-    playerGroup.position.set(0, 0, 0);
-    
-    // Restore visibility
-    playerGroup.traverse(obj => {
-        if (obj.material) obj.material.opacity = 1;
-    });
-    
-    sendPlayerUpdate();
-}
-
-function initBackgroundAudio() {
-    const audioLoader = new THREE.AudioLoader();
-    audioLoader.load('/sounds/background.mp3', (buffer) => {
-        const bgSound = new THREE.Audio(listener);
-        bgSound.setBuffer(buffer);
-        bgSound.setLoop(true);
-        bgSound.setVolume(0.1);
-
-        // Tocar apenas após interação do usuário
-        document.addEventListener('click', () => {
-            if (audioContextSuspended) {
-                bgSound.play();
-                audioContextSuspended = false;
-            }
-        }, { once: true });
-    });
-}
-
-function checkPowerUpCollisions() {
-    const playerPos = playerGroup.position;
-
-    powerUps.forEach(powerUp => {
-        if (!powerUp.active) return;
-
-        const distance = playerPos.distanceTo(powerUp.mesh.position);
-        if (distance < 1.2) {
-            applyPowerUp(powerUp.type);
-            powerUp.active = false;
-            scene.remove(powerUp.mesh);
-
-            playSound(sounds.powerup, 0.7);
-        }
-    });
-}
-
-function applyPowerUp(type) {
-    const icon = document.createElement('div');
-    icon.className = 'powerup-icon';
-    icon.style.backgroundColor = `#${type.color.toString(16)}`;
-    document.getElementById('active-powerups').appendChild(icon);
-
-    if (type.duration > 0) {
-        setTimeout(() => {
-            icon.remove();
-        }, type.duration * 1000);
-    }
-
-    switch (type) {
-        case POWERUP_TYPES.HEALTH:
-            playerHP = Math.min(playerHP + 30, 100);
-            updateHUD();
-            break;
-
-        case POWERUP_TYPES.AMMO:
-            guns.leftGun.ammo = MAX_AMMO;
-            guns.rightGun.ammo = MAX_AMMO;
-            updateHUD();
-            break;
-
-        case POWERUP_TYPES.SPEED:
-            const originalSpeed = BASE_MOVE_SPEED;
-            BASE_MOVE_SPEED *= 1.5;
-            
-            setTimeout(() => {
-                BASE_MOVE_SPEED = originalSpeed;
-            }, type.duration * 1000);
-            break;
-
-        case POWERUP_TYPES.DAMAGE:
-            // Aumentar dano temporariamente
-            const originalRecoil = RECOIL_STRENGTH;
-            RECOIL_STRENGTH *= 1.5;
-            setTimeout(() => {
-                RECOIL_STRENGTH = originalRecoil;
-            }, type.duration * 1000);
-            break;
-    }
-}
-
-function createLocalPlayer() {
-    playerGroup = new THREE.Group();
-    scene.add(playerGroup);
-
-    const bodyGeo = new THREE.SphereGeometry(0.5, 16, 16);
-    const bodyMat = new THREE.MeshPhongMaterial({ color: 0x5555ff, opacity: 0, transparent: true });
-    const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
-    bodyMesh.position.set(0, 0.5, 0);
-
-    playerGroup.add(bodyMesh);
-
-    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 0.5, 0);
-    playerGroup.add(camera);
-
-    const leftGun = createGunMesh();
-    leftGun.position.set(-0.50, 0.6, -0.5);
-    playerGroup.add(leftGun);
-    guns.leftGun.mesh = leftGun;
-
-    const rightGun = createGunMesh();
-    rightGun.position.set(0.50, 0.6, -0.5);
-    playerGroup.add(rightGun);
-    guns.rightGun.mesh = rightGun;
-}
-
-function createPlayerMesh(color = 0xff0000) {
-    const group = new THREE.Group();
-
-    // The sphere body
-    const sphereGeo = new THREE.SphereGeometry(0.5, 16, 16);
-    const sphereMat = new THREE.MeshPhongMaterial({ color });
-    const sphereMesh = new THREE.Mesh(sphereGeo, sphereMat);
-    sphereMesh.position.set(0, 0.5, 0);
-    group.add(sphereMesh);
-
-    // Left gun
-    const leftGun = createGunMesh();
-    leftGun.position.set(-0.75, 0.3, 0);
-    group.add(leftGun);
-
-    // Right gun
-    const rightGun = createGunMesh();
-    rightGun.position.set(0.75, 0.3, 0);
-    group.add(rightGun);
-
-    group.userData.leftGun = leftGun;
-    group.userData.rightGun = rightGun;
-
-    return group;
-}
-
-function createGunMesh() {
-    const gunGroup = new THREE.Group();
-
-    // BODY
-    const bodyGeo = new THREE.BoxGeometry(0.1, 0.15, 0.4);
-    const bodyMat = new THREE.MeshPhongMaterial({ color: 0x444444, shininess: 30 });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.position.set(0, 0, -0.2);
-    gunGroup.add(body);
-
-    // Pivot for the barrel
-    const barrelPivot = new THREE.Group();
-    barrelPivot.position.set(0, 0, -0.2);
-    gunGroup.add(barrelPivot);
-
-    // BARREL
-    const barrelGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.6, 10);
-    const barrelMat = new THREE.MeshPhongMaterial({ color: 0x555555, shininess: 50 });
-    const barrel = new THREE.Mesh(barrelGeo, barrelMat);
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.set(0, 0, -0.3);
-    barrelPivot.add(barrel);
-
-    // Muzzle flash
-    const muzzleMount = new THREE.Object3D();
-    muzzleMount.position.set(0, -0.4, 0);
-    barrel.add(muzzleMount);
-    const muzzleFlash = createMuzzleFlash();
-    muzzleFlash.visible = false;
-    muzzleMount.add(muzzleFlash);
-
-    gunGroup.userData.barrelPivot = barrelPivot;
-    gunGroup.userData.muzzleFlash = muzzleFlash;
-
-    // STOCK
-    const stockGeo = new THREE.BoxGeometry(0.08, 0.12, 0.2);
-    const stockMat = new THREE.MeshPhongMaterial({ color: 0x2b2b2b, shininess: 10 });
-    const stock = new THREE.Mesh(stockGeo, stockMat);
-    stock.position.set(0, 0, 0.1);
-    stock.rotation.x = 0.15;
-    gunGroup.add(stock);
-
-    return gunGroup;
-}
-
-function createMuzzleFlash() {
-    const flashGeo = new THREE.SphereGeometry(0.06, 8, 8);
-    const flashMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
-    return new THREE.Mesh(flashGeo, flashMat);
-}
-
-// ---------------------------------
-//  POINTER LOCK HANDLERS
-// ---------------------------------
-function onPointerLockChange() {
-    if (document.pointerLockElement === document.body) {
-        blocker.style.display = 'none';
-    } else {
-        blocker.style.display = 'flex';
-    }
-}
-
-function onPointerLockError() {
-    instructions.style.display = '';
-}
-
-// ---------------------------------
-//  KEY/MOUSE EVENTS
-// ---------------------------------
-function onKeyDown(event) {
-    if (isDead) return;
-
-    switch (event.code) {
-        case 'KeyW':
-        case 'ArrowUp':
-            moveForward = true;
-            break;
-        case 'KeyS':
-        case 'ArrowDown':
-            moveBackward = true;
-            break;
-        case 'KeyA':
-        case 'ArrowLeft':
-            moveLeft = true;
-            break;
-        case 'KeyD':
-        case 'ArrowRight':
-            moveRight = true;
-            break;
-        case 'Space':
-            if (canJump) {
-                velocity.y = 10.0;
-                playSound(sounds.jump, 0.5);
-                canJump = false;
-            } else if (performance.now() - lastWallTime < wallJumpGracePeriod) {
-                // Wall jump
-                velocity.y = wallJumpVerticalSpeed;
-                velocity.addScaledVector(lastWallNormal, wallJumpHorizontalSpeed);
-                lastWallTime = 0; // Prevent multiple jumps
-                playSound(sounds.jump, 0.5);
-                canJump = false;
-            }
-            break;
-        case 'KeyR':
-            if (!isReloading) {
-                startReload();
-            }
-            break;
-        case 'ShiftLeft':
-        case 'ShiftRight':
-            isRunning = true;
-            break;
-        case 'KeyQ':
-            if (canDash && !isDashing) {
-                startDash();
-            }
-            break;
-        default:
-            break;
-    }
-}
-
-function onKeyUp(event) {
-    switch (event.code) {
-        case 'KeyW':
-        case 'ArrowUp':
-            moveForward = false;
-            break;
-        case 'KeyS':
-        case 'ArrowDown':
-            moveBackward = false;
-            break;
-        case 'KeyA':
-        case 'ArrowLeft':
-            moveLeft = false;
-            break;
-        case 'KeyD':
-        case 'ArrowRight':
-            moveRight = false;
-            break;
-        case 'ShiftLeft':
-        case 'ShiftRight':
-            isRunning = false;
-            break;
-        default:
-            break;
-    }
-}
-
-function startDash() {
-    isDashing = true;
-    dashTimer = 0;
-    canDash = false;
-    dashCooldownTimer = 0;
-
-    // Calculate dash direction based on camera's forward direction
-    const dashDirection = new THREE.Vector3();
-    camera.getWorldDirection(dashDirection);
-    dashDirection.y = 0; // Keep dash horizontal
-    dashDirection.normalize();
-
-    // Apply dash velocity
-    velocity.addScaledVector(dashDirection, DASH_SPEED);
-    playSound(sounds.dash, 0.6);
-}
-
-function onMouseDown(event) {
-    if (isDead) return;
-
-    // 0 = left click, 2 = right click
-    if (event.button === 0) {
-        shootGun(guns.leftGun, 'left');
-    } else if (event.button === 2) {
-        shootGun(guns.rightGun, 'right');
-    }
-}
-
-function onMouseMove(event) {
-    if (document.pointerLockElement === document.body) {
-        yaw -= event.movementX * mouseSensitivity;
-        pitch -= event.movementY * mouseSensitivity;
-
-        const maxPitch = Math.PI / 2 - 0.01;
-        if (pitch > maxPitch) pitch = maxPitch;
-        if (pitch < -maxPitch) pitch = -maxPitch;
-    }
-}
-
-function onWindowResize() {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-}
-
-// ---------------------------------
-//  SHOOTING
-// ---------------------------------
-function shootGun(gun, gunSide) {
-    if (isDead || isReloading || gun.ammo <= 0 || isRunning) return;
-
-    gun.ammo--;
-    updateHUD();
-
-    // Recoil
-    recoilTimer = 0;
-
-    // Show muzzle flash
-    const muzzleFlash = gun.mesh.userData.muzzleFlash;
-    if (muzzleFlash) {
-        muzzleFlash.visible = true;
-        gun.muzzleFlashTimer = 0;
-    }
-
-    // Eject shell
-    ejectShell(gun.mesh);
-
-    // Spawn projectile locally
-    spawnProjectile(gun.mesh);
-
-    // Tell server we shot
-    if (socket) {
-        socket.emit('shoot', gunSide);
-    }
-
-    playSound(sounds.gunshot, 0.4);
-}
-
-function ejectShell(gunMesh) {
-    const shellGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.06, 8);
-    const shellMat = new THREE.MeshPhongMaterial({ color: 0xb08d57 });
-    const shell = new THREE.Mesh(shellGeo, shellMat);
-
-    const worldPos = new THREE.Vector3();
-    gunMesh.getWorldPosition(worldPos);
-    shell.position.copy(worldPos);
-    scene.add(shell);
-
-    const shellVel = new THREE.Vector3(
-        (Math.random() - 0.5) * 1.0,
-        1 + Math.random() * 0.3,
-        (Math.random() - 0.5) * 1.0
-    );
-
-    shellCasings.push({
-        mesh: shell,
-        velocity: shellVel,
-        life: 1.5
-    });
-}
-
-function spawnProjectile(gunMesh) {
-    const projGeo = new THREE.SphereGeometry(0.05, 8, 8);
-    const projMat = new THREE.MeshPhongMaterial({ color: 0xff0000 });
-    const projectile = new THREE.Mesh(projGeo, projMat);
-
-    const muzzlePos = new THREE.Vector3();
-    gunMesh.userData.muzzleFlash.getWorldPosition(muzzlePos);
-    projectile.position.copy(muzzlePos);
-
-    scene.add(projectile);
-
-    // Direction from the camera's perspective
-    const dir = new THREE.Vector3();
-    camera.getWorldDirection(dir);
-    dir.normalize();
-    const projVel = dir.multiplyScalar(projectileSpeed);
-
-    projectiles.push({
-        mesh: projectile,
-        velocity: projVel,
-        life: 0,
-        shooterId: socket.id,
-    });
-}
-
-function checkPlayerCollision(projectile) {
-    const projRadius = 0.05;
-    const projPos = projectile.mesh.position;
-
-    // 1. Check collision with other remote players
-    for (let id in otherPlayers) {
-        const other = otherPlayers[id];
-        // The center of the remote player's sphere is at Y=0.5 in your code
-        const otherPos = other.position.clone();
-        otherPos.y += 0.5; // about the center of that player
-
-        const distance = projPos.distanceTo(otherPos);
-        // Player radius ~0.5, projectile radius 0.05
-        if (distance < 0.5 + projRadius) {
-            // We hit this remote player
-            // Notify the server that 'id' was hit by 'shooterId'
-            socket.emit('playerHit', {
-                victimId: id,
-                damage: 15,
-                shooterId: projectile.shooterId
-            });
-
-            // If the local shooter is me, show a quick "hit marker"
-            if (projectile.shooterId === socket.id) {
-                playSound(sounds.enemyhit, 2);
-                showHitMarker();
-            }
-
-            return true; // collision happened
-        }
-    }
-
-    if (projectile.shooterId !== socket.id) {
-        const localPos = playerGroup.position.clone();
-        localPos.y += 0.5;
-        if (!isDead && projPos.distanceTo(localPos) < 0.5 + projRadius) {
-            socket.emit('playerHit', {
-                victimId: socket.id,
-                damage: 15,
-                shooterId: projectile.shooterId
-            });
-            return true;
-        }
-    }
-
-    return false;
-}
-
-
-// ---------------------------------
-//  RELOAD
-// ---------------------------------
-function startReload() {
-    isReloading = true;
-    reloadTimer = 0;
-
-    playSound(sounds.reload, 0.5);
-}
-
-function updateReloadAnimation(delta) {
-    reloadTimer += delta;
-    let progress = reloadTimer / RELOAD_TIME;
-    if (progress > 1) progress = 1;
-
-    const leftGun = guns.leftGun.mesh;
-    const rightGun = guns.rightGun.mesh;
-    if (!leftGun || !rightGun) return;
-
-    let reloadPhase = progress < 0.5 ? (progress * 2) : (2 - progress * 2);
-
-    // Calculate pull back distance and rotation for a dynamic pump action
-    const pullBackDistance = reloadPhase * -0.3; // Adjust this value to control how far back the gun moves
-    const tiltAngle = reloadPhase * Math.PI / 3;
-
-    // Apply position and rotation to both guns
-    leftGun.position.z = -0.5 - pullBackDistance; // Initial Z position is -0.5, pull back along local Z
-    leftGun.rotation.x = tiltAngle; // Tilt the gun upwards
-
-    rightGun.position.z = -0.5 - pullBackDistance;
-    rightGun.rotation.x = tiltAngle;
-
-    if (progress >= 1) {
-        // Reload complete: reset ammo and gun transforms
-        guns.leftGun.ammo = MAX_AMMO;
-        guns.rightGun.ammo = MAX_AMMO;
-
-        // Reset gun position and rotation
-        leftGun.position.z = -0.5;
-        leftGun.rotation.x = 0;
-        rightGun.position.z = -0.5;
-        rightGun.rotation.x = 0;
-
-        isReloading = false;
-        updateHUD();
-    }
-}
-
-function updateHUD() {
-    // Update health
-    const healthFill = document.getElementById('healthFill');
-    const healthText = document.getElementById('healthText');
-    healthFill.style.width = `${playerHP}%`;
-    healthText.textContent = playerHP;
-
-    // Update ammo
-    const leftAmmoFill = document.getElementById('leftAmmoFill');
-    const rightAmmoFill = document.getElementById('rightAmmoFill');
-    leftAmmoFill.style.height = `${(guns.leftGun.ammo / MAX_AMMO) * 100}%`;
-    rightAmmoFill.style.height = `${(guns.rightGun.ammo / MAX_AMMO) * 100}%`;
-
-    // Update dash cooldown
-    const dashProgress = document.getElementById('dashProgress');
-    const cooldownProgress = 1 - (dashCooldownTimer / DASH_COOLDOWN);
-    dashProgress.style.background = `conic-gradient(#00ffff ${cooldownProgress * 100}%, 0%, rgba(0,0,0,0.3) 100%)`;
-}
-
-// ---------------------------------
-//  SOCKET.IO
-// ---------------------------------
-function initSocket() {
-    socket = io();
-    socket.on('connect', () => {
-        console.log('Connected to server. My socket id:', socket.id);
-    });
-
-    socket.on('matchFound', ({ roomId, opponent, opponentState, yourState }) => {
-        // Hide menu and show game
-        currentRoomId = roomId;
-        document.getElementById('mainMenu').style.display = 'none';
-        document.getElementById('modern-hud').style.display = 'block';
-        renderer.domElement.style.visibility = 'visible';
-        
-        // Initialize game state
-        initGameState(opponent, opponentState, yourState);
-      });
-    
-      socket.on('playerLeft', () => {
-        alert('Opponent disconnected! Returning to lobby...');
-        resetGameState();
-      });
-
-    // Current players
-    socket.on('currentPlayers', (players) => {
-        for (let id in players) {
-            if (id !== socket.id) {
-                createOtherPlayer(id, players[id]);
-            }
-        }
-    });
-
-    socket.on('matchEnded', () => {
-        resetGameState();
-      });
-
-    // A new player joined
-    socket.on('newPlayer', (playerData) => {
-        if (playerData.id !== socket.id) {
-            createOtherPlayer(playerData.id, playerData);
-        }
-    });
-
-    socket.on('playerKilled', ({ shooterId, victimId }) => {
-        // 1) Add kill feed message
-        addKillFeedMessage(`${shooterId} killed ${victimId}`);
-
-        // 2) If I'm the victim, handle local death
-        if (victimId === socket.id) {
-            handleLocalPlayerDeath();
-        }
-    });
-
-    // A remote player updated
-    socket.on('playerUpdated', (id, state) => {
-        // If the update is for ME (the local player):
-        if (id === socket.id) {
-            if (typeof state.hp !== 'undefined') {
-                playerHP = state.hp;       // update local player's HP
-                updateHUD();              // refresh HUD
-            }
-            // If you want position sync from server, you can also do it here
-            // (optional, if you trust the server for authoritative positions)
-            if (state.position) {
-                playerGroup.position.set(state.position[0], state.position[1], state.position[2]);
-            }
-        }
-        // Otherwise, it's for a REMOTE player
-        else {
-            const other = otherPlayers[id];
-            if (!other) return;
-    
-            if (typeof state.hp !== 'undefined') {
-                other.userData.hp = state.hp;
-            }
-            if (state.position) {
-                other.position.set(state.position[0], state.position[1], state.position[2]);
-            }
-            if (state.rotation) {
-                // Set group's Y rotation (yaw)
-                other.rotation.y = state.rotation[1]; // Yaw
-                
-                // Update gun rotations (pitch and roll)
-                const leftGun = other.userData.leftGun;
-                const rightGun = other.userData.rightGun;
-                if (leftGun) {
-                    leftGun.rotation.x = state.rotation[0]; // Pitch
-                    leftGun.rotation.z = state.rotation[2]; // Roll
-                }
-                if (rightGun) {
-                    rightGun.rotation.x = state.rotation[0]; // Pitch
-                    rightGun.rotation.z = state.rotation[2]; // Roll
-                }
-            }
-        }
-
-        if (id === socket.id && state.hp < playerHP) {
-            playSound(sounds.hurt, 0.6);
-            if (state.hp <= 0) playSound(sounds.death, 0.8);
-        }
-    });
-
-    // A remote player has fired
-    socket.on('playerShot', (playerId, gunSide) => {
-        const other = otherPlayers[playerId];
-        if (!other) return;
-
-        // Briefly show muzzle flash for that side
-        const posAudio = new THREE.PositionalAudio(listener);
-        posAudio.setBuffer(sounds.gunshot);
-        posAudio.setRefDistance(15);
-        other.add(posAudio);
-        posAudio.play();
-        setTimeout(() => other.remove(posAudio), 1000);
-
-        let gunMesh;
-        if (gunSide === 'left') {
-            gunMesh = other.userData.leftGun;
-        } else {
-            gunMesh = other.userData.rightGun;
-        }
-        if (gunMesh && gunMesh.userData.muzzleFlash) {
-            // Show muzzle flash
-            gunMesh.userData.muzzleFlash.visible = true;
-            setTimeout(() => {
-                gunMesh.userData.muzzleFlash.visible = false;
-            }, 50);
-    
-            // Spawn projectile from remote player's gun
-            const muzzleFlash = gunMesh.userData.muzzleFlash;
-            const worldPos = new THREE.Vector3();
-            muzzleFlash.getWorldPosition(worldPos);
-    
-            // Calculate direction based on gun's orientation
-            const direction = new THREE.Vector3();
-            gunMesh.getWorldDirection(direction);
-            direction.negate(); // Guns point along -Z
-            const projVel = direction.multiplyScalar(projectileSpeed);
-    
-            // Create projectile mesh
-            const projGeo = new THREE.SphereGeometry(0.05, 8, 8);
-            const projMat = new THREE.MeshPhongMaterial({ color: 0xff0000 }); // Red for enemy shots
-            const projectile = new THREE.Mesh(projGeo, projMat);
-            projectile.position.copy(worldPos);
-            scene.add(projectile);
-    
-            projectiles.push({
-                mesh: projectile,
-                velocity: projVel,
-                life: 0,
-                shooterId: playerId,
-            });
-        }
-    });
-
-    // Player disconnected
-    socket.on('playerDisconnected', (id) => {
-        if (otherPlayers[id]) {
-            scene.remove(otherPlayers[id]);
-            delete otherPlayers[id];
-        }
-    });
-}
-
-function initGameState(opponentId, opponentState, yourState) {
-    // Reset scene
-    Object.keys(otherPlayers).forEach(id => {
-      scene.remove(otherPlayers[id]);
-      delete otherPlayers[id];
-    });
-  
-    // Set local player state
-    playerGroup.position.set(...yourState.position);
-    playerHP = yourState.hp;
-    guns.leftGun.ammo = yourState.ammoLeft;
-    guns.rightGun.ammo = yourState.ammoRight;
-    updateHUD();
-  
-    // Create opponent
-    createOtherPlayer(opponentId, opponentState);
-  
-    // Enable controls
-    document.body.requestPointerLock();
-  }
-
-function addKillFeedMessage(text) {
-    killMessages.push({ text, life: KILL_FEED_DURATION });
-}
-
-function resetGameState() {
-    // Show menu again
-    document.getElementById('mainMenu').style.display = 'flex';
-    document.getElementById('modern-hud').style.display = 'none';
-    document.getElementById('matchStatus').style.display = 'none';
-    renderer.domElement.style.visibility = 'hidden';
-    
-    // Reset camera/controls
-    camera.rotation.set(0, 0, 0);
-    playerGroup.rotation.set(0, 0, 0);
-    document.exitPointerLock();
-  
-    // Clear game state
-    Object.keys(otherPlayers).forEach(id => {
-      scene.remove(otherPlayers[id]);
-      delete otherPlayers[id];
-    });
-    
-    // Reset local player
-    playerGroup.position.set(0, 0, 0);
-    playerHP = 100;
-    guns.leftGun.ammo = MAX_AMMO;
-    guns.rightGun.ammo = MAX_AMMO;
-    updateHUD();
-  }
-
-/**
- * Create the remote player as a sphere + guns
- */
-function createOtherPlayer(id, playerData) {
-    const color = 0xff0000; // or randomize
-    const mesh = createPlayerMesh(color);
-
-    mesh.position.set(
-        playerData.position[0],
-        playerData.position[1],
-        playerData.position[2]
-    );
-
-    mesh.rotation.set(
-        playerData.rotation[0],
-        playerData.rotation[1],
-        playerData.rotation[2]
-    );
-
-    mesh.userData.hp = playerData.hp || 100;
-    mesh.userData.ammoLeft = playerData.ammoLeft || MAX_AMMO;
-    mesh.userData.ammoRight = playerData.ammoRight || MAX_AMMO;
-
-    scene.add(mesh);
-    otherPlayers[id] = mesh;
-}
-
-// ---------------------------------
-//  ANIMATION / MAIN LOOP
-// ---------------------------------
 function animate() {
     requestAnimationFrame(animate);
 
     const time = performance.now();
-    const delta = (time - prevTime) / 1000;
-    prevTime = time;
+    const delta = (time - state.prevTime) / 1000;
+    state.prevTime = time;
 
-    // 1) Turn tilt
-    const currentYaw = yaw;
-    const turnSpeed = currentYaw - lastYaw;
-    lastYaw = currentYaw;
-    rollAngle += turnSpeed * turnRollFactor;
-    rollAngle -= rollAngle * rollDamp * delta;
+    const currentYaw = state.yaw;
+    const turnSpeed = currentYaw - state.lastYaw;
+    state.lastYaw = currentYaw;
+    state.rollAngle += turnSpeed * state.turnRollFactor;
+    state.rollAngle -= state.rollAngle * state.rollDamp * delta;
 
-    // 2) Movement input -> local velocity
+    // Input -> movimento
     const inputVector = new THREE.Vector3();
-    if (!isDead) {
-        if (moveForward) inputVector.z -= 5;
-        if (moveBackward) inputVector.z += 5;
-        if (moveLeft) inputVector.x -= 5;
-        if (moveRight) inputVector.x += 5;
+    if (!state.isDead) {
+        if (state.moveForward) inputVector.z -= 5;
+        if (state.moveBackward) inputVector.z += 5;
+        if (state.moveLeft) inputVector.x -= 5;
+        if (state.moveRight) inputVector.x += 5;
     }
 
-    const yawRotation = new THREE.Euler(0, yaw, 0, 'YXZ');
+    const yawRotation = new THREE.Euler(0, state.yaw, 0, 'YXZ');
     const movementDir = inputVector.clone().applyEuler(yawRotation);
 
-    // 3) Friction & gravity
+    // Fricção + gravidade
     const friction = 8.0;
     const moveSpeed = 10.0;
     const gravity = 9.8 * 3.0;
 
-    velocity.x -= velocity.x * friction * delta;
-    velocity.z -= velocity.z * friction * delta;
-    velocity.y -= gravity * delta;
+    state.velocity.x -= state.velocity.x * friction * delta;
+    state.velocity.z -= state.velocity.z * friction * delta;
+    state.velocity.y -= gravity * delta;
 
-    // 4) Accelerate
-    velocity.x += movementDir.x * moveSpeed * delta;
-    velocity.z += movementDir.z * moveSpeed * delta;
+    state.velocity.x += movementDir.x * moveSpeed * delta;
+    state.velocity.z += movementDir.z * moveSpeed * delta;
 
-    // 5) Update local player position
-    playerGroup.position.x += velocity.x * delta;
-    playerGroup.position.y += velocity.y * delta;
-    playerGroup.position.z += velocity.z * delta;
+    // Atualiza posição
+    state.playerGroup.position.x += state.velocity.x * delta;
+    state.playerGroup.position.y += state.velocity.y * delta;
+    state.playerGroup.position.z += state.velocity.z * delta;
 
-    // 6) Check ground
+    // Checa colisão com ambiente
     const onGround = checkPlayerCollisions();
     if (onGround) {
-        canJump = true; // Allow jumping when on the ground
+        state.canJump = true;
+    }
+    if (state.isTouchingWall && !onGround) {
+        state.velocity.y = Math.max(state.velocity.y, -state.wallSlideSpeed);
     }
 
-    if (isTouchingWall && !onGround) {
-        velocity.y = Math.max(velocity.y, -wallSlideSpeed);
-    }
-
-    // 7) Head-bob
-    const speedXZ = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+    // Head-bob
+    const speedXZ = Math.sqrt(state.velocity.x * state.velocity.x + state.velocity.z * state.velocity.z);
     const isMoving = speedXZ > 0.1 && onGround;
     if (isMoving) {
-        walkTime += delta * (speedXZ * 0.3);
-        const bobOffset = Math.sin(walkTime * bobFrequency) * bobAmplitude;
-        // Slight camera vertical bob
-        camera.position.y = 1.0 + bobOffset;
+        state.walkTime += delta * (speedXZ * 0.3);
+        const bobOffset = Math.sin(state.walkTime * state.bobFrequency) * state.bobAmplitude;
+        state.camera.position.y = 1.0 + bobOffset;
     } else {
-        walkTime = 0;
-        camera.position.y = 1.0; // reset
+        state.walkTime = 0;
+        state.camera.position.y = 1.0;
     }
 
-    // 8) Recoil
-    if (recoilTimer < RECOIL_DURATION) {
-        recoilTimer += delta;
-        const progress = recoilTimer / RECOIL_DURATION;
-        currentRecoil = (1 - progress) * RECOIL_STRENGTH;
+    // Recoil
+    if (state.recoilTimer < state.RECOIL_DURATION) {
+        state.recoilTimer += delta;
+        const progress = state.recoilTimer / state.RECOIL_DURATION;
+        state.currentRecoil = (1 - progress) * state.RECOIL_STRENGTH;
     } else {
-        currentRecoil = 0;
+        state.currentRecoil = 0;
     }
-    const finalPitch = pitch - currentRecoil;
+    const finalPitch = state.pitch - state.currentRecoil;
 
-    // 9) Apply camera + group rotation
-    // We rotate the playerGroup around Y for yaw,
-    // and tilt the camera for pitch + roll if desired.
-    playerGroup.rotation.y = yaw;
-    camera.rotation.x = finalPitch;
-    camera.rotation.z = rollAngle;
+    // Aplica rotações
+    state.playerGroup.rotation.y = state.yaw;
+    state.camera.rotation.x = finalPitch;
+    state.camera.rotation.z = state.rollAngle;
 
-    guns.leftGun.mesh.rotation.x = camera.rotation.x;
-    guns.leftGun.mesh.rotation.z = camera.rotation.z;
-    guns.rightGun.mesh.rotation.x = camera.rotation.x;
-    guns.rightGun.mesh.rotation.z = camera.rotation.z;
+    // Armas seguem rotação da câmera
+    state.guns.leftGun.mesh.rotation.x = state.camera.rotation.x;
+    state.guns.leftGun.mesh.rotation.z = state.camera.rotation.z;
+    state.guns.rightGun.mesh.rotation.x = state.camera.rotation.x;
+    state.guns.rightGun.mesh.rotation.z = state.camera.rotation.z;
 
-    if (isReloading) {
+    // Reload
+    if (state.isReloading) {
         updateReloadAnimation(delta);
     }
 
-    // Update movement speed based on running state
-    const currentMoveSpeed = isRunning ? BASE_MOVE_SPEED * RUN_SPEED_MULTIPLIER : BASE_MOVE_SPEED;
-    velocity.x += movementDir.x * currentMoveSpeed * delta;
-    velocity.z += movementDir.z * currentMoveSpeed * delta;
+    // Sprint / Run
+    const currentMoveSpeed = state.isRunning ? state.BASE_MOVE_SPEED * state.RUN_SPEED_MULTIPLIER : state.BASE_MOVE_SPEED;
+    state.velocity.x += movementDir.x * currentMoveSpeed * delta;
+    state.velocity.z += movementDir.z * currentMoveSpeed * delta;
 
-    // Update gun tilt when running
-    const targetTilt = isRunning ? GUN_TILT_ANGLE : 0;
-    currentGunTilt = THREE.MathUtils.lerp(currentGunTilt, targetTilt, delta * 10);
-    guns.leftGun.mesh.rotation.x = camera.rotation.x + currentGunTilt;
-    guns.rightGun.mesh.rotation.x = camera.rotation.x + currentGunTilt;
+    // Tilt das armas ao correr
+    const targetTilt = state.isRunning ? state.GUN_TILT_ANGLE : 0;
+    state.currentGunTilt = THREE.MathUtils.lerp(state.currentGunTilt, targetTilt, delta * 10);
+    state.guns.leftGun.mesh.rotation.x = state.camera.rotation.x + state.currentGunTilt;
+    state.guns.rightGun.mesh.rotation.x = state.camera.rotation.x + state.currentGunTilt;
 
-    // Handle dash animation and cooldown
-    if (isDashing) {
-        dashTimer += delta;
-        const progress = Math.min(dashTimer / DASH_DURATION, 1.0);
-        const roll = Math.sin(progress * Math.PI) * DASH_ROLL_ANGLE;
-        camera.rotation.z = roll;
+    // Dash
+    if (state.isDashing) {
+        state.dashTimer += delta;
+        const progress = Math.min(state.dashTimer / state.DASH_DURATION, 1.0);
+        const roll = Math.sin(progress * Math.PI) * state.DASH_ROLL_ANGLE;
+        state.camera.rotation.z = roll;
 
-        if (dashTimer >= DASH_DURATION) {
-            isDashing = false;
-            camera.rotation.z = 0;
+        if (state.dashTimer >= state.DASH_DURATION) {
+            state.isDashing = false;
+            state.camera.rotation.z = 0;
         }
     }
 
-    if (!canDash) {
-        dashCooldownTimer += delta;
-        if (dashCooldownTimer >= DASH_COOLDOWN) {
-            canDash = true;
-            dashCooldownTimer = 0;
+    if (!state.canDash) {
+        state.dashCooldownTimer += delta;
+        if (state.dashCooldownTimer >= state.DASH_COOLDOWN) {
+            state.canDash = true;
+            state.dashCooldownTimer = 0;
         }
         updateHUD();
     }
 
-    // Update hit marker timer
-    if (hitMarkerEl.style.display === 'block') {
-        hitMarkerTimer += delta;
-        if (hitMarkerTimer > hitMarkerDuration) {
-            hitMarkerEl.style.display = 'none';
+    // Hit marker
+    if (state.hitMarkerEl.style.display === 'block') {
+        state.hitMarkerTimer += delta;
+        if (state.hitMarkerTimer > state.hitMarkerDuration) {
+            state.hitMarkerEl.style.display = 'none';
         }
     }
 
-    // 11) Update muzzle flashes (for local guns)
+    // Atualiza muzzle flash local
     updateMuzzleFlashes(delta);
 
-    // 12) Projectiles
+    // Atualiza projéteis
     updateProjectiles(delta);
 
-    // 13) Shell casings
+    // Atualiza cartuchos
     updateShellCasings(delta);
 
-    // 14) Hit effects
+    // Atualiza efeitos de hit
     updateHitEffects(delta);
 
-    // 15) Send local player state to server
+    // Envia update do player local
     sendPlayerUpdate();
 
+    // Kill feed
     updateKillFeed(delta);
 
-    powerUps.forEach(powerUp => {
-        if (!powerUp.active) {
-            powerUp.respawnTimer += delta;
-            if (powerUp.respawnTimer >= powerUp.type.respawnTime) {
-                powerUp.active = true;
-                powerUp.respawnTimer = 0;
-                scene.add(powerUp.mesh);
-            }
-        } else {
-            powerUp.mesh.rotation.y += delta;
-            powerUp.particles.children.forEach(p => {
-                p.position.y = Math.sin(performance.now() * 0.001 + p.uOffset) * 0.2;
-            });
-        }
-    });
-
+    // Power-ups
+    updatePowerUps(delta);
     checkPowerUpCollisions();
 
-    renderer.render(scene, camera);
-}
-
-function showHitMarker() {
-    const hitMarker = document.createElement('div');
-    hitMarker.className = 'hit-marker';
-    document.getElementById('modern-hud').appendChild(hitMarker);
-    setTimeout(() => hitMarker.remove(), 300);
-}
-
-function updateKillFeed(delta) {
-    // Decrement life of each message
-    for (let i = killMessages.length - 1; i >= 0; i--) {
-        killMessages[i].life -= delta;
-        if (killMessages[i].life <= 0) {
-            killMessages.splice(i, 1);
-        }
-    }
-
-    // Rebuild the killFeedEl's innerHTML
-    killFeedEl.innerHTML = killMessages
-        .map(msg => `<div>${msg.text}</div>`)
-        .join('');
+    state.renderer.render(state.scene, state.camera);
 }
 
 /**
- * Send local player's data to server
- */
-function sendPlayerUpdate() {
-    if (!socket || !currentRoomId) return;
-
-    const pos = [
-        playerGroup.position.x,
-        playerGroup.position.y,
-        playerGroup.position.z
-    ];
-    const rot = [
-        camera.rotation.x,
-        playerGroup.rotation.y,
-        camera.rotation.z
-    ];
-    const state = {
-        position: pos,
-        rotation: rot,
-        hp: playerHP,
-        ammoLeft: guns.leftGun.ammo,
-        ammoRight: guns.rightGun.ammo
-    };
-    socket.emit('playerUpdate', state);
-}
-
-function playSound(buffer, volume = 1) {
-    if (!buffer || audioContextSuspended) return;
-
-    const sound = new THREE.Audio(listener);
-    sound.setBuffer(buffer);
-    sound.setVolume(volume);
-    sound.play();
-    setTimeout(() => sound.disconnect(), 3000);
-}
-
-/**
- * Update muzzle flashes for local guns
+ * Muzzle flashes locais
  */
 function updateMuzzleFlashes(delta) {
-    [guns.leftGun, guns.rightGun].forEach((gun) => {
+    [state.guns.leftGun, state.guns.rightGun].forEach((gun) => {
         const muzzleFlash = gun.mesh.userData.muzzleFlash;
         if (!muzzleFlash || !muzzleFlash.visible) return;
-
         gun.muzzleFlashTimer += delta;
         if (gun.muzzleFlashTimer > 0.05) {
             muzzleFlash.visible = false;
@@ -1368,58 +229,44 @@ function updateMuzzleFlashes(delta) {
 }
 
 /**
- * Projectiles movement + collision
+ * Atualiza projéteis
  */
 function updateProjectiles(delta) {
-    for (let i = projectiles.length - 1; i >= 0; i--) {
-        const p = projectiles[i];
+    for (let i = state.projectiles.length - 1; i >= 0; i--) {
+        const p = state.projectiles[i];
         p.life += delta;
-
-        // Lifetime check
-        if (p.life > projectileLifetime) {
-            scene.remove(p.mesh);
-            projectiles.splice(i, 1);
+        if (p.life > state.projectileLifetime) {
+            state.scene.remove(p.mesh);
+            state.projectiles.splice(i, 1);
             continue;
         }
-
-        // Move projectile
         p.mesh.position.addScaledVector(p.velocity, delta);
 
-        // Check environment collision
+        // Checa colisão com ambiente
         if (checkProjectileCollision(p.mesh)) {
             spawnHitEffect(p.mesh.position);
-            scene.remove(p.mesh);
-            projectiles.splice(i, 1);
+            state.scene.remove(p.mesh);
+            state.projectiles.splice(i, 1);
             continue;
         }
 
-        // Check player collision
+        // Checa colisão com players
         if (checkPlayerCollision(p)) {
             spawnHitEffect(p.mesh.position);
-            scene.remove(p.mesh);
-            projectiles.splice(i, 1);
+            state.scene.remove(p.mesh);
+            state.projectiles.splice(i, 1);
             continue;
         }
     }
 }
 
-function handleLocalPlayerDeath() {
-    isDead = true;
-    velocity.set(0, 0, 0);
-    respawnOverlayEl.style.display = 'flex';
-    
-    // Automatically reset after 5 seconds
-    setTimeout(() => {
-      resuscitate();
-      resetGameState();
-    }, 5000);
-}
-
+/**
+ * Verifica colisão do projétil com o ambiente
+ */
 function checkProjectileCollision(projMesh) {
     const radius = 0.05;
     const projPos = projMesh.position.clone();
-
-    for (let envMesh of environmentMeshes) {
+    for (let envMesh of state.environmentMeshes) {
         const box = new THREE.Box3().setFromObject(envMesh);
         if (box.distanceToPoint(projPos) < radius) {
             return true;
@@ -1428,47 +275,70 @@ function checkProjectileCollision(projMesh) {
     return false;
 }
 
-function spawnHitEffect(position) {
-    const geo = new THREE.SphereGeometry(0.1, 6, 6);
-    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
-    const puff = new THREE.Mesh(geo, mat);
-    puff.position.copy(position);
-    scene.add(puff);
+/**
+ * Verifica colisão do projétil com players
+ */
+function checkPlayerCollision(projectile) {
+    const projRadius = 0.05;
+    const projPos = projectile.mesh.position;
 
-    hitEffects.push({ mesh: puff, life: 0 });
-    const hitSound = new THREE.PositionalAudio(listener);
-    hitSound.setBuffer(sounds.hit);
-    hitSound.setRefDistance(20);
-    const dummy = new THREE.Object3D();
-    dummy.position.copy(position);
-    scene.add(dummy);
-    dummy.add(hitSound);
-    hitSound.play();
-    setTimeout(() => scene.remove(dummy), 2000);
-}
-
-function updateHitEffects(delta) {
-    for (let i = hitEffects.length - 1; i >= 0; i--) {
-        const eff = hitEffects[i];
-        eff.life += delta;
-        const scale = 1 + eff.life * 3;
-        eff.mesh.scale.set(scale, scale, scale);
-        eff.mesh.material.opacity = 0.8 - eff.life * 0.8;
-
-        if (eff.life > 1) {
-            scene.remove(eff.mesh);
-            hitEffects.splice(i, 1);
+    // Checa players remotos
+    for (let id in state.otherPlayers) {
+        const other = state.otherPlayers[id];
+        const otherPos = other.position.clone();
+        otherPos.y += 0.5;
+        const distance = projPos.distanceTo(otherPos);
+        if (distance < 0.5 + projRadius) {
+            // Atingiu outro player
+            state.socket.emit('playerHit', {
+                victimId: id,
+                damage: 15,
+                shooterId: projectile.shooterId
+            });
+            if (projectile.shooterId === state.socket.id) {
+                playSound(state.sounds.enemyhit, 2);
+                showHitMarker();
+            }
+            return true;
         }
     }
+
+    // Checa player local
+    if (projectile.shooterId !== state.socket.id) {
+        const localPos = state.playerGroup.position.clone();
+        localPos.y += 0.5;
+        if (!state.isDead && projPos.distanceTo(localPos) < 0.5 + projRadius) {
+            state.socket.emit('playerHit', {
+                victimId: state.socket.id,
+                damage: 15,
+                shooterId: projectile.shooterId
+            });
+            return true;
+        }
+    }
+    return false;
 }
 
+/**
+ * Mostra um hitmarker simples na tela.
+ */
+function showHitMarker() {
+    const hitMarker = document.createElement('div');
+    hitMarker.className = 'hit-marker';
+    document.getElementById('modern-hud').appendChild(hitMarker);
+    setTimeout(() => hitMarker.remove(), 300);
+}
+
+/**
+ * Atualiza cartuchos
+ */
 function updateShellCasings(delta) {
-    for (let i = shellCasings.length - 1; i >= 0; i--) {
-        const shell = shellCasings[i];
+    for (let i = state.shellCasings.length - 1; i >= 0; i--) {
+        const shell = state.shellCasings[i];
         shell.life -= delta;
         if (shell.life < 0) {
-            scene.remove(shell.mesh);
-            shellCasings.splice(i, 1);
+            state.scene.remove(shell.mesh);
+            state.shellCasings.splice(i, 1);
             continue;
         }
         shell.velocity.y -= 9.8 * delta;
@@ -1481,114 +351,20 @@ function updateShellCasings(delta) {
     }
 }
 
-function initMenu() {
-    document.getElementById('findMatchBtn').addEventListener('click', () => {
-      socket.emit('findMatch');
-      document.getElementById('matchStatus').style.display = 'block';
-    });
-  
-    document.getElementById('controlsBtn').addEventListener('click', () => {
-        document.getElementById('instructions').style.display = 'flex';
-        document.getElementById('menuButtons').style.display = 'none';
-    });
+/**
+ * Atualiza efeitos de hit
+ */
+function updateHitEffects(delta) {
+    for (let i = state.hitEffects.length - 1; i >= 0; i--) {
+        const eff = state.hitEffects[i];
+        eff.life += delta;
+        const scale = 1 + eff.life * 3;
+        eff.mesh.scale.set(scale, scale, scale);
+        eff.mesh.material.opacity = 0.8 - eff.life * 0.8;
 
-    document.getElementById('controlsBackBtn').addEventListener('click', () => {
-          document.getElementById('instructions').style.display = 'none';
-          document.getElementById('menuButtons').style.display = 'flex';
-      });
-  }
-
-  function checkPlayerCollisions() {
-    isTouchingWall = false; // Reset each frame
-    let onGround = false; // Track if the player is on the ground
-    const playerSphere = new THREE.Sphere(
-        new THREE.Vector3(
-            playerGroup.position.x,
-            playerGroup.position.y + 0.5, // Adjust for player's center
-            playerGroup.position.z
-        ),
-        0.5 // Player's collision radius
-    );
-
-    for (const mesh of environmentMeshes) {
-        const box = new THREE.Box3().setFromObject(mesh);
-        if (box.intersectsSphere(playerSphere)) {
-            const closestPoint = new THREE.Vector3();
-            box.clampPoint(playerSphere.center, closestPoint);
-            const direction = playerSphere.center.clone().sub(closestPoint);
-            const distance = direction.length();
-
-            if (distance < playerSphere.radius) {
-                const overlap = playerSphere.radius - distance;
-                const normal = direction.normalize();
-                playerGroup.position.add(normal.multiplyScalar(overlap));
-
-                // Check if collision is with the ground (normal pointing upwards)
-                if (normal.y > 1) { // Adjust threshold based on your needs
-                    onGround = true;
-                    velocity.y = 0; // Stop vertical movement
-                }
-
-                // Wall collision handling
-                if (Math.abs(normal.y) < 0.3) {
-                    isTouchingWall = true;
-                    lastWallNormal.copy(normal);
-                    lastWallTime = performance.now();
-                }
-
-                // Adjust velocity to prevent sinking into the surface
-                const velocityDot = velocity.dot(normal);
-                if (velocityDot < 0) {
-                    velocity.addScaledVector(normal, -velocityDot);
-                }
-            }
+        if (eff.life > 1) {
+            state.scene.remove(eff.mesh);
+            state.hitEffects.splice(i, 1);
         }
     }
-
-    return onGround;
-}
-
-function createWall(width, height, depth) {
-    return new THREE.Mesh(
-        new THREE.BoxGeometry(width, height, depth),
-        new THREE.MeshPhongMaterial({
-            color: 0x444444,
-            shininess: 30
-        })
-    );
-}
-
-function createPowerUp(type, position) {
-    const geometry = new THREE.SphereGeometry(0.4, 16, 16);
-    const material = new THREE.MeshPhongMaterial({
-        color: type.color,
-        emissive: type.color,
-        emissiveIntensity: 0.5
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.set(position.x, position.y, position.z);
-
-    // Adicionar efeito de partículas
-    const particles = new THREE.Group();
-    const particleGeo = new THREE.SphereGeometry(0.05, 8, 8);
-    const particleMat = new THREE.MeshPhongMaterial({ color: type.color });
-    for (let i = 0; i < 8; i++) {
-        const particle = new THREE.Mesh(particleGeo, particleMat);
-        particle.uOffset = Math.random() * Math.PI * 2;
-        particle.position.set(
-            Math.random() - 0.5,
-            Math.random() - 0.5,
-            Math.random() - 0.5
-        ).normalize().multiplyScalar(0.6);
-        particles.add(particle);
-    }
-    mesh.add(particles);
-
-    return {
-        mesh: mesh,
-        type: type,
-        particles: particles,
-        active: true,
-        respawnTimer: 0
-    };
 }
