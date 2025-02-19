@@ -42,12 +42,6 @@ export function handleLocalPlayerDeath() {
     state.isDead = true;
     state.velocity.set(0, 0, 0);
     state.respawnOverlayEl.style.display = 'flex';
-
-    // Auto reset após 5s
-    setTimeout(() => {
-        resuscitate();
-        resetGameState();
-    }, 5000);
 }
 
 import { resuscitate } from './player.js';

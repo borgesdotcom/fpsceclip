@@ -1,4 +1,4 @@
-// server.js - Updated with matchmaking and movement logging
+// server.js
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -21,17 +21,15 @@ const rooms = new Map(); // roomID -> { players: [id1, id2], states: {...} }
 io.on('connection', (socket) => {
   console.log('Player connected:', socket.id);
 
-  // Matchmaking handler
   socket.on('findMatch', () => {
     if (queue.includes(socket.id)) return;
-    
     queue.push(socket.id);
-    console.log(`Player ${socket.id} entered queue (${queue.length} waiting)`);
+    console.log(`Player ${socket.id} entrou na fila (${queue.length} na fila)`);
 
     if (queue.length >= 2) {
       const [player1, player2] = queue.splice(0, 2);
       const roomId = `room_${player1}_${player2}`;
-      
+
       rooms.set(roomId, {
         players: [player1, player2],
         states: {
@@ -43,11 +41,11 @@ io.on('connection', (socket) => {
       [player1, player2].forEach(playerId => {
         const playerSocket = io.sockets.sockets.get(playerId);
         if (!playerSocket) return;
-        
+
         playerSocket.join(roomId);
-        const opponentId = playerId === player1 ? player2 : player1;
-        
-        // Send both players' initial states
+        const opponentId = (playerId === player1) ? player2 : player1;
+
+        // Mandar cada jogador para a partida
         playerSocket.emit('matchFound', {
           roomId,
           opponent: opponentId,
@@ -55,19 +53,15 @@ io.on('connection', (socket) => {
           yourState: rooms.get(roomId).states[playerId]
         });
       });
-      console.log('Match started:', roomId);
+      console.log('Match iniciado:', roomId);
     }
   });
 
-  // Handler for movement/other updates
   socket.on('playerUpdate', (state) => {
     const room = getPlayerRoom(socket);
     if (!room) return;
-  
-    // Update the stored state for the player
-    room.states[socket.id] = { ...room.states[socket.id], ...state };
 
-    // Broadcast update to the other player(s) in the room
+    room.states[socket.id] = { ...room.states[socket.id], ...state };
     socket.to(room.id).emit('playerUpdated', socket.id, state);
   });
 
@@ -85,11 +79,36 @@ io.on('connection', (socket) => {
 
     victim.hp = Math.max(0, victim.hp - damage);
     io.to(room.id).emit('playerUpdated', victimId, { hp: victim.hp });
-    console.log(`Player ${victimId} was hit by ${shooterId} for ${damage} damage. New HP: ${victim.hp}`);
+
+    console.log(`Player ${victimId} foi atingido por ${shooterId}, dano ${damage}, HP: ${victim.hp}`);
 
     if (victim.hp === 0) {
+      // Notifica kill
       io.to(room.id).emit('playerKilled', { shooterId, victimId });
-      setTimeout(() => resetRoom(room.id), 5000);
+
+      // Adiciona kill pro atirador
+      room.states[shooterId].score++;
+
+      // Atualiza score para todos
+      io.to(room.id).emit('scoreUpdate', {
+        [shooterId]: room.states[shooterId].score,
+        [victimId]: room.states[victimId].score
+      });
+
+      // Verifica se chegou a 3 kills (vitória)
+      if (room.states[shooterId].score >= 3) {
+        io.to(room.id).emit('matchWin', {
+          winnerId: shooterId,
+          scores: {
+            [shooterId]: room.states[shooterId].score,
+            [victimId]: room.states[victimId].score
+          }
+        });
+        setTimeout(() => resetRoom(room.id), 5000);
+      } else {
+        // Apenas reset de round
+        roundReset(room, room.id);
+      }
     }
   });
 
@@ -105,7 +124,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// Helpers
+// Função para criar estado inicial de um player
 function createPlayerState(id) {
   return {
     id,
@@ -113,19 +132,20 @@ function createPlayerState(id) {
     rotation: [0, 0, 0],
     hp: 100,
     ammoLeft: 8,
-    ammoRight: 8
+    ammoRight: 8,
+    score: 0 // <-- Campo de pontuação
   };
 }
 
 function getPlayerRoom(socket) {
-  // Look for room names that start with "room_"
   const roomIds = Array.from(socket.rooms).filter(r => r.startsWith('room_'));
-  return roomIds.length ? { 
-    id: roomIds[0], 
+  return roomIds.length ? {
+    id: roomIds[0],
     ...rooms.get(roomIds[0])
   } : null;
 }
 
+// Reseta a partida completamente
 function resetRoom(roomId) {
   const room = rooms.get(roomId);
   if (room) {
@@ -137,11 +157,28 @@ function resetRoom(roomId) {
       }
     });
     rooms.delete(roomId);
-    console.log(`Room ${roomId} cleaned up`);
+    console.log(`Room ${roomId} encerrado`);
+  }
+}
+
+// Reseta apenas o ROUND (HP, ammo, posição)
+function roundReset(room, roomId) {
+  for (const pid of room.players) {
+    const st = room.states[pid];
+    st.hp = 100;
+    st.ammoLeft = 8;
+    st.ammoRight = 8;
+    st.position = [0, 1.6, 0]; // Pode trocar pra spawn aleatório, etc.
+
+    // Notifica cada cliente desse reset
+    io.to(roomId).emit('roundReset', {
+      playerId: pid,
+      state: st
+    });
   }
 }
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Servidor escutando na porta ${PORT}`);
 });

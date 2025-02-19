@@ -11,6 +11,10 @@ export const state = {
     socket: null,
     currentRoomId: null,
 
+    // Score
+    localScore: 0,
+    opponentScore: 0,
+
     // Grupos e objetos
     playerGroup: null,
     otherPlayers: {},

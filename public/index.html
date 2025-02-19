@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8" />
-    <title>Snowball FPS - Expanded Example</title>
+    <title>DUEL</title>
     <style>
         body {
             margin: 0;
@@ -13,6 +13,9 @@
             font-family: sans-serif;
         }
 
+        /* ---------------------------------------------
+       CSS DO JOGO / HUD
+    --------------------------------------------- */
         #hud {
             position: absolute;
             top: 10px;
@@ -257,12 +260,26 @@
             height: 100%;
             text-align: center;
             display: none;
+            /* será setado pra flex no JS */
             flex-direction: column;
             justify-content: center;
             align-items: center;
             background: rgba(0, 0, 0, 0.5);
             color: white;
             cursor: pointer;
+        }
+
+        /* Animação simples de entrada (fade + scale) */
+        @keyframes fadeInScale {
+            0% {
+                opacity: 0;
+                transform: scale(0.9);
+            }
+
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
         }
 
         #blocker {
@@ -284,6 +301,142 @@
         #instructions2 {
             text-align: center;
         }
+
+        /* ---------------------------------------------
+       MENU PRINCIPAL (MAIN MENU) - ANIMADO
+    --------------------------------------------- */
+        #mainMenu {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 1);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            z-index: 1000;
+            /* Fade-in inicial do menu */
+            animation: fadeInMenu 0.5s forwards;
+        }
+
+        @keyframes fadeInMenu {
+            0% {
+                opacity: 0;
+            }
+
+            100% {
+                opacity: 1;
+            }
+        }
+
+        .game-title {
+            font-size: 3em;
+            margin-bottom: 40px;
+            font-weight: bold;
+            text-shadow: 0 0 10px #00ffea;
+            animation: pulseTitle 2s infinite alternate;
+        }
+
+        @keyframes pulseTitle {
+            0% {
+                text-shadow: 0 0 10px #00ffea;
+            }
+
+            100% {
+                text-shadow: 0 0 20px #00ffc8;
+            }
+        }
+
+        #menuButtons {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        /* Botões do menu */
+        #menuButtons button {
+            padding: 15px 30px;
+            font-size: 1.5em;
+            background: #444;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            color: #fff;
+        }
+
+        /* Efeitos ao passar o mouse nos botões */
+        #menuButtons button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.2);
+        }
+
+        /* Exemplo de cor individual */
+        #findMatchBtn {
+            background: #00b300;
+        }
+
+        #controlsBtn,
+        #controlsBackBtn {
+            background: #0088ff;
+        }
+
+        /* Texto de "Searching for opponent..." com spinner */
+        #matchStatus {
+            margin-top: 30px;
+            font-size: 1.2em;
+            display: none;
+            /* default: hidden */
+            position: relative;
+        }
+
+        /* Classe que adicionamos no JS para animar (opcional) */
+        #matchStatus.searching::before {
+            content: "";
+            position: absolute;
+            left: -30px;
+            top: 3px;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #fff;
+            border-top: 3px solid transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* Mensagem Searching (quando exibida) */
+        #matchStatus.show {
+            display: block;
+        }
+
+        /* Ajuste do overlay de respawn */
+        #respawnOverlay {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: white;
+            opacity: 0.9;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            font-family: sans-serif;
+            font-size: 30px;
+            color: black;
+        }
     </style>
 </head>
 
@@ -291,59 +444,33 @@
     <div id="blocker">
         <div id="instructions2">Clique para jogar</div>
     </div>
-    <!-- Add to body before other elements -->
-    <div id="mainMenu" style="
-    position: absolute;
-    width: 100%;
-    height: 100%;
-    background: rgba(0,0,0,1);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    z-index: 1000;
-  ">    
+
+    <!-- MENU PRINCIPAL -->
+    <div id="mainMenu">
+        <!-- Título/Logo do jogo -->
+        <div class="game-title">DUEL</div>
+
+        <!-- Overlay de instruções (exibido ao clicar em Controls) -->
         <div id="instructions">
             <p>W A S D - Move</p>
             <p>Space - Jump</p>
             <p>R - Reload</p>
             <p>Left Mouse - Fire Left Gun</p>
             <p>Right Mouse - Fire Right Gun</p>
-            <button id="controlsBackBtn" style="
-                margin-top: 10px;
-                padding: 15px 30px;
-                font-size: 1.5em;
-                background: #0088ff;
-                border: none;
-                border-radius: 10px;
-                cursor: pointer;
-                transition: transform 0.2s;
-            ">Back</button>
+            <button id="controlsBackBtn">Back</button>
         </div>
 
-        <div id="menuButtons" style="display: flex; flex-direction: column; gap: 20px;">
-            <button id="findMatchBtn" style="
-                padding: 15px 30px;
-                font-size: 1.5em;
-                background: #00ff00;
-                border: none;
-                border-radius: 10px;
-                cursor: pointer;
-                transition: transform 0.2s;
-            ">Find 1v1 Match</button>
-            <button id="controlsBtn" style="
-                padding: 15px 30px;
-                font-size: 1.5em;
-                background: #0088ff;
-                border: none;
-                border-radius: 10px;
-                cursor: pointer;
-                transition: transform 0.2s;
-            ">Controls</button>
+        <!-- Botões do menu principal -->
+        <div id="menuButtons">
+            <button id="findMatchBtn">Find 1v1 Match</button>
+            <button id="controlsBtn">Controls</button>
         </div>
-        <div id="matchStatus" style="margin-top: 30px; font-size: 1.2em; display: none;">Searching for opponent...</div>
+
+        <!-- Status de busca de partida -->
+        <div id="matchStatus">Searching for opponent...</div>
     </div>
+
+    <!-- HUD do jogo -->
     <div id="modern-hud">
         <!-- Health Container -->
         <div class="health-container">
@@ -385,44 +512,54 @@
             </div>
         </div>
     </div>
-    <div id="hitMarker" style="
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        font-size: 48px;
-        color: red;
-        display: none;
-        pointer-events: none;
-    ">X</div>
-    <div id="killFeed" style="
-        position: absolute;
-        top: 10px;
-        right: 10px;
-        width: 200px;
-        font-family: sans-serif;
-        font-size: 14px;
-        color: #fff;
-        text-shadow: 1px 1px 2px #000;
-    "></div>
 
-    <!-- Death/Respawn overlay -->
-    <div id="respawnOverlay" style="
-        display: none;
+    <div id="scoreboard" style="
         position: absolute;
-        top: 0; left: 0; 
-        width: 100%; height: 100%;
-        background: white;
-        opacity: 0.9;
-        justify-content: center;
-        align-items: center;
-        text-align: center;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: #fff;
+        font-size: 1.2rem;
         font-family: sans-serif;
-        font-size: 30px;
-        color: black;
+        text-shadow: 1px 1px 2px #000;
+        z-index: 999;
     ">
+        <div id="scoreText">Score: 0 - 0</div>
+    </div>
+
+    <!-- Hit Marker -->
+    <div id="hitMarker" style="
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          font-size: 48px;
+          color: red;
+          display: none;
+          pointer-events: none;
+        ">
+        X
+    </div>
+
+    <!-- Kill Feed -->
+    <div id="killFeed" style="
+          position: absolute;
+          top: 10px;
+          right: 10px;
+          width: 200px;
+          font-family: sans-serif;
+          font-size: 14px;
+          color: #fff;
+          text-shadow: 1px 1px 2px #000;
+        ">
+    </div>
+
+    <!-- Overlay de Respawn (morte) -->
+    <div id="respawnOverlay">
         <div>YOU DIED!</div>
     </div>
+
+    <!-- Seu JS Bundle -->
     <script src="/bundle.js"></script>
 </body>
 

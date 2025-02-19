@@ -24,6 +24,7 @@ export function initSocket() {
         initGameState(opponent, opponentState, yourState);
     });
 
+    // Oponente saiu
     state.socket.on('playerLeft', () => {
         alert('Oponente desconectou! Voltando para o lobby...');
         resetGameState();
@@ -31,6 +32,61 @@ export function initSocket() {
 
     state.socket.on('matchEnded', () => {
         resetGameState();
+    });
+
+    state.socket.on('scoreUpdate', (scores) => {
+        // scores = { [shooterId]: x, [victimId]: y }
+        // Precisamos descobrir qual é o score do local e do oponente
+        // se 'scores' tiver state.socket.id => é nosso
+        // se 'scores' tiver outro ID => é do oponente
+        const myId = state.socket.id;
+        for (let pid in scores) {
+            if (pid === myId) {
+                state.localScore = scores[pid];
+            } else {
+                state.opponentScore = scores[pid];
+            }
+        }
+        updateScoreboard();
+    });
+
+    // Alguém venceu
+    state.socket.on('matchWin', ({ winnerId, scores }) => {
+        for (let pid in scores) {
+            if (pid === state.socket.id) {
+                state.localScore = scores[pid];
+            } else {
+                state.opponentScore = scores[pid];
+            }
+        }
+        updateScoreboard();
+
+        const winnerText = (winnerId === state.socket.id) ? 'VOCÊ VENCEU!' : 'VOCÊ PERDEU!';
+        showVictoryScreen(winnerText);
+    });
+
+    // Recebe roundReset (ressuscita, HP=100, ammo=8, pos=[0,1.6,0], etc.)
+    state.socket.on('roundReset', ({ playerId, state: newState }) => {
+        if (playerId === state.socket.id) {
+            // Atualiza nosso estado local
+            state.playerHP = newState.hp;
+            state.guns.leftGun.ammo = newState.ammoLeft;
+            state.guns.rightGun.ammo = newState.ammoRight;
+            state.playerGroup.position.set(...newState.position);
+            // Remove flags de morte, etc.
+            state.isDead = false;
+            // Se quiser fechar respawnOverlay etc.
+            state.respawnOverlayEl.style.display = 'none';
+        } else {
+            // É o oponente
+            const other = state.otherPlayers[playerId];
+            if (other) {
+                other.userData.hp = newState.hp;
+                other.userData.ammoLeft = newState.ammoLeft;
+                other.userData.ammoRight = newState.ammoRight;
+                other.position.set(...newState.position);
+            }
+        }
     });
 
     state.socket.on('currentPlayers', (players) => {
@@ -174,4 +230,32 @@ function spawnRemoteProjectile(playerId, gunMesh) {
         life: 0,
         shooterId: playerId
     });
+}
+
+function updateScoreboard() {
+    const scoreTextEl = document.getElementById('scoreText');
+    if (!scoreTextEl) return;
+    scoreTextEl.textContent = `Score: ${state.localScore} - ${state.opponentScore}`;
+}
+
+function showVictoryScreen(text) {
+    const overlay = document.createElement('div');
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.background = 'rgba(0,0,0,0.8)';
+    overlay.style.color = '#fff';
+    overlay.style.fontSize = '3em';
+    overlay.style.display = 'flex';
+    overlay.style.justifyContent = 'center';
+    overlay.style.alignItems = 'center';
+    overlay.style.zIndex = '9999';
+    overlay.textContent = text;
+    document.body.appendChild(overlay);
+
+    setTimeout(() => {
+        overlay.remove();
+    }, 5000);
 }
